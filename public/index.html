@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jewellery Inventory</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💎</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>💎 Jewellery Inventory</h1>
+    <div class="top-actions">
+      <button class="ghost" id="btn-activity" type="button">Activity</button>
+      <button class="ghost" id="btn-categories" type="button">Categories</button>
+      <button class="ghost" id="btn-export" type="button" title="Download as CSV (opens in Excel)">Export</button>
+      <button class="primary" id="btn-add" type="button">+ Add item</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stats" id="stats"></section>
+
+    <section class="filters">
+      <input type="search" id="search" placeholder="Search by name, code, metal, stone…" autocomplete="off">
+      <label class="check"><input type="checkbox" id="low-only"> Low stock only</label>
+    </section>
+    <nav class="chips" id="chips" aria-label="Categories"></nav>
+
+    <div id="list" class="list"></div>
+    <p id="empty" class="empty" hidden></p>
+  </main>
+
+  <!-- Add / edit item -->
+  <dialog id="dlg-item">
+    <form id="form-item" method="dialog">
+      <h2 id="item-title">Add item</h2>
+      <p class="code-line" id="item-code" hidden></p>
+      <div class="grid">
+        <label class="full">Name *<input name="name" required placeholder="e.g. Rose gold heart ring"></label>
+        <label class="full">Category *
+          <div class="row">
+            <select name="category_id" id="item-category" required></select>
+            <button type="button" class="ghost" id="btn-new-cat">+ New</button>
+          </div>
+        </label>
+        <label>Metal
+          <input name="metal" list="metals" placeholder="Gold, Silver…">
+        </label>
+        <label>Purity
+          <input name="purity" list="purities" placeholder="22K, 18K, 925…">
+        </label>
+        <label>Weight (g)<input name="weight_g" type="number" step="0.001" min="0" inputmode="decimal"></label>
+        <label>Size<input name="size" placeholder="Ring size, length…"></label>
+        <label class="full">Stone / gem<input name="stone" placeholder="Diamond 0.25ct, Ruby…"></label>
+        <label>Cost price<input name="cost_price" type="number" step="0.01" min="0" inputmode="decimal"></label>
+        <label>Selling price<input name="sell_price" type="number" step="0.01" min="0" inputmode="decimal"></label>
+        <label>Supplier<input name="supplier" list="suppliers"></label>
+        <label>Low-stock alert at<input name="low_stock" type="number" step="1" min="0" value="1" inputmode="numeric"></label>
+        <label id="opening-wrap">Opening stock<input name="qty" type="number" step="1" min="0" value="0" inputmode="numeric"></label>
+        <label class="full">Notes<textarea name="notes" rows="2"></textarea></label>
+      </div>
+      <p class="error" id="item-error" hidden></p>
+      <div class="actions">
+        <button type="button" class="danger ghost" id="btn-delete-item" hidden>Delete</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Stock in / out -->
+  <dialog id="dlg-stock">
+    <form id="form-stock" method="dialog">
+      <h2 id="stock-title">Stock</h2>
+      <p class="muted" id="stock-sub"></p>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="dir" value="in"> <span>＋ Stock in</span></label>
+        <label><input type="radio" name="dir" value="out"> <span>－ Stock out</span></label>
+      </div>
+      <label>Quantity
+        <div class="stepper">
+          <button type="button" data-step="-1" aria-label="Less">−</button>
+          <input name="amount" type="number" min="1" step="1" value="1" inputmode="numeric" required>
+          <button type="button" data-step="1" aria-label="More">+</button>
+        </div>
+      </label>
+      <label>Reason<select name="reason" id="stock-reason"></select></label>
+      <label>Note<input name="note" placeholder="Customer name, invoice no., etc. (optional)"></label>
+      <p class="error" id="stock-error" hidden></p>
+      <div class="actions">
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- History -->
+  <dialog id="dlg-history">
+    <div class="dlg-body">
+      <h2 id="history-title">History</h2>
+      <div id="history-list" class="history"></div>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Categories -->
+  <dialog id="dlg-cats">
+    <div class="dlg-body">
+      <h2>Categories</h2>
+      <p class="muted">Saved once, reused everywhere. The 3-letter code is used to make item codes (e.g. RIN-0001).</p>
+      <form id="form-cat" class="row">
+        <input name="name" placeholder="New category, e.g. Earrings" required>
+        <button class="primary" type="submit">Add</button>
+      </form>
+      <p class="error" id="cat-error" hidden></p>
+      <ul id="cat-list" class="cat-list"></ul>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Password -->
+  <dialog id="dlg-login">
+    <form id="form-login" method="dialog">
+      <h2>Enter password</h2>
+      <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <p class="error" id="login-error" hidden></p>
+      <div class="actions"><span class="spacer"></span><button class="primary" type="submit">Unlock</button></div>
+    </form>
+  </dialog>
+
+  <datalist id="metals">
+    <option>Gold</option><option>Silver</option><option>Platinum</option><option>Rose gold</option>
+    <option>White gold</option><option>Brass</option><option>Copper</option><option>Stainless steel</option>
+  </datalist>
+  <datalist id="purities">
+    <option>24K</option><option>22K</option><option>21K</option><option>18K</option><option>14K</option>
+    <option>925</option><option>950</option>
+  </datalist>
+  <datalist id="suppliers"></datalist>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
