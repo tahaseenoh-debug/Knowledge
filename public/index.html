@@ -36,6 +36,16 @@
     <form id="form-item" method="dialog">
       <h2 id="item-title">Add item</h2>
       <p class="code-line" id="item-code" hidden></p>
+      <div class="photo-field">
+        <div class="photo-preview" id="photo-preview"><span>No photo</span></div>
+        <div class="photo-btns">
+          <label class="filebtn">📷 <span id="photo-label">Add photo</span>
+            <input type="file" id="photo-input" accept="image/*" hidden>
+          </label>
+          <button type="button" class="ghost danger" id="btn-remove-photo" hidden>Remove photo</button>
+          <p class="muted">Take a picture or choose one from the gallery. It's resized automatically.</p>
+        </div>
+      </div>
       <div class="grid">
         <label class="full">Name *<input name="name" required placeholder="e.g. Rose gold heart ring"></label>
         <label class="full">Category *
@@ -103,6 +113,14 @@
       <h2 id="history-title">History</h2>
       <div id="history-list" class="history"></div>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Photo viewer -->
+  <dialog id="dlg-photo" class="photo-dlg">
+    <div class="dlg-body">
+      <img id="photo-big" alt="">
+      <div class="actions"><span id="photo-caption" class="muted"></span><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
     </div>
   </dialog>
 

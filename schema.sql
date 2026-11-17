@@ -40,5 +40,12 @@ CREATE TABLE IF NOT EXISTS movements (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS product_photos (
+  product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  mime       TEXT NOT NULL,
+  data       TEXT NOT NULL,          -- base64 image, resized in the browser
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id, created_at);

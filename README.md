@@ -8,6 +8,7 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
 - **Auto product codes**: every item gets a code built from its category, e.g. `RIN-0001` or `EAR-0003`. You don't need your own coding system yet.
 - **Stock in / out**: the − and + buttons on each item. Each change records the quantity, a reason (Sale, Purchase, Repair, Return…) and an optional note (customer, invoice no.). Stock can't go below zero.
 - **History**: every movement is logged per item, and **Activity** shows recent changes across all items.
+- **Photos**: take a picture with the phone camera or pick one from the gallery. It's shrunk automatically to about 100–250 KB and saved in the same free database, so there's nothing extra to set up. Tap a thumbnail to see it full size.
 - **Jewellery details**: metal, purity (22K / 18K / 925…), weight in grams, stone, size, cost and selling price, supplier, notes.
 - **Low-stock alerts**: each item has its own threshold, with a "Low stock only" filter.
 - **Search and filter** by name, code, metal or stone, and by category.

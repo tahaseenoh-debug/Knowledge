@@ -9,6 +9,7 @@ const state = {
   lowOnly: false,
   editing: null,   // product being edited
   stockItem: null, // product in stock dialog
+  photo: null,     // pending photo in the item form: {dataUrl} to upload, "remove", or null for no change
 };
 
 const REASONS = {
@@ -27,7 +28,14 @@ const fmtDate = (s) => {
 
 // ---------- API ----------
 function getPassword() { try { return localStorage.getItem("inv-pw") || ""; } catch { return ""; } }
-function setPassword(p) { try { localStorage.setItem("inv-pw", p); } catch {} }
+function setPasswordCookie(p) {
+  // Lets <img> tags load photos when a password is set (they can't send headers).
+  document.cookie = `inv_pw=${encodeURIComponent(p)}; path=/; max-age=31536000; SameSite=Strict` +
+    (location.protocol === "https:" ? "; Secure" : "");
+}
+function setPassword(p) { try { localStorage.setItem("inv-pw", p); } catch {} setPasswordCookie(p); }
+if (getPassword()) setPasswordCookie(getPassword());
+const photoUrl = (p) => `/api/products/${p.id}/photo?v=${encodeURIComponent(p.photo_v)}`;
 
 async function api(path, opts = {}) {
   const res = await fetch("/api/" + path, {
@@ -42,9 +50,14 @@ async function api(path, opts = {}) {
   return data;
 }
 
+let passwordPrompt = null; // shared, so parallel requests wait for the same prompt
 function askPassword() {
+  if (!passwordPrompt) passwordPrompt = showPasswordPrompt().finally(() => { passwordPrompt = null; });
+  return passwordPrompt;
+}
+
+function showPasswordPrompt() {
   const dlg = $("#dlg-login"), form = $("#form-login"), err = $("#login-error");
-  if (dlg.open) return new Promise(() => {}); // one prompt at a time
   return new Promise((resolve) => {
     if (getPassword()) { err.textContent = "That password didn't work."; err.hidden = false; }
     form.onsubmit = async (e) => {
@@ -127,7 +140,11 @@ function itemHtml(p) {
   ].filter(Boolean).map(esc).join(" · ");
   const cls = p.qty === 0 ? "zero" : p.qty <= p.low_stock ? "low" : "";
   const badge = p.qty === 0 ? '<span class="badge out">Out of stock</span>' : p.qty <= p.low_stock ? '<span class="badge">Low stock</span>' : "";
+  const thumb = p.photo_v
+    ? `<button class="thumb" data-act="photo" aria-label="View photo"><img src="${photoUrl(p)}" alt="" loading="lazy"></button>`
+    : `<div class="thumb" aria-hidden="true">💍</div>`;
   return `<article class="item ${cls}" data-id="${p.id}">
+    ${thumb}
     <div>
       <div class="head"><span class="code">${esc(p.code)}</span><span class="name">${esc(p.name)}</span>${badge}</div>
       <div class="meta">${meta}</div>
@@ -203,6 +220,9 @@ function openItem(product = null) {
   $("#btn-delete-item").hidden = !product;
   $("#opening-wrap").hidden = !!product;
   renderCategorySelect(product ? product.category_id : state.activeCat || "");
+  state.photo = null;
+  $("#photo-input").value = "";
+  showPhotoPreview(product && product.photo_v ? photoUrl(product) : null);
   if (product) {
     for (const el of form.elements) {
       if (el.name && el.name in product && el.name !== "qty") el.value = product[el.name] ?? "";
@@ -227,16 +247,24 @@ async function saveItem(e) {
   e.preventDefault();
   const form = e.target;
   const body = Object.fromEntries(new FormData(form));
+  body._isNew = !state.editing;
   const btn = form.querySelector("[type=submit]");
   btn.disabled = true;
   try {
+    let p;
     if (state.editing) {
-      await api("products/" + state.editing.id, { method: "PUT", body });
-      toast("Saved");
+      p = await api("products/" + state.editing.id, { method: "PUT", body });
     } else {
-      const p = await api("products", { method: "POST", body });
-      toast(`Added ${p.code}`);
+      p = await api("products", { method: "POST", body });
+      state.editing = p; // if the photo upload fails, a retry updates instead of adding a duplicate
     }
+    if (state.photo === "remove") {
+      await api(`products/${p.id}/photo`, { method: "DELETE" });
+    } else if (state.photo) {
+      await api(`products/${p.id}/photo`, { method: "PUT", body: { data: state.photo.dataUrl } });
+    }
+    state.photo = null;
+    toast(body._isNew ? `Added ${p.code}` : `Saved ${p.code}`);
     $("#dlg-item").close();
     await refresh();
   } catch (err) { showError($("#item-error"), err); }
@@ -252,6 +280,61 @@ async function deleteItem() {
     toast("Deleted");
     await refresh();
   } catch (err) { showError($("#item-error"), err); }
+}
+
+// ---------- photos ----------
+function showPhotoPreview(src) {
+  $("#photo-preview").innerHTML = src ? `<img src="${esc(src)}" alt="">` : "<span>No photo</span>";
+  $("#btn-remove-photo").hidden = !src;
+  $("#photo-label").textContent = src ? "Change photo" : "Add photo";
+}
+
+// Shrink to at most 1000px on the long side and re-encode as JPEG, so phone photos
+// (often 3-8 MB) become roughly 100-250 KB.
+async function resizeImage(file, maxSide = 1000, quality = 0.82) {
+  let src;
+  try { src = await createImageBitmap(file, { imageOrientation: "from-image" }); }
+  catch {
+    src = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("Couldn't read that image. Try a JPEG or PNG."));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+  const w = src.width, h = src.height, scale = Math.min(1, maxSide / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(h * scale);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; // transparent PNGs get a white background
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+async function pickPhoto(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  $("#item-error").hidden = true;
+  try {
+    const dataUrl = await resizeImage(file);
+    state.photo = { dataUrl };
+    showPhotoPreview(dataUrl);
+  } catch (err) { showError($("#item-error"), err); }
+}
+
+function removePhoto() {
+  state.photo = "remove";
+  $("#photo-input").value = "";
+  showPhotoPreview(null);
+}
+
+function openPhoto(p) {
+  $("#photo-big").src = photoUrl(p);
+  $("#photo-big").alt = p.name;
+  $("#photo-caption").textContent = `${p.code} · ${p.name}`;
+  $("#dlg-photo").showModal();
 }
 
 // ---------- stock in / out ----------
@@ -372,6 +455,8 @@ function wire() {
   $("#btn-export").onclick = exportCsv;
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
+  $("#photo-input").onchange = pickPhoto;
+  $("#btn-remove-photo").onclick = removePhoto;
   $("#form-item").onsubmit = saveItem;
   $("#form-stock").onsubmit = saveStock;
   $("#form-cat").onsubmit = addCategory;
@@ -406,6 +491,7 @@ function wire() {
     const act = btn.dataset.act;
     if (act === "edit") openItem(p);
     else if (act === "history") openHistory(p);
+    else if (act === "photo") openPhoto(p);
     else openStock(p, act);
   };
 }

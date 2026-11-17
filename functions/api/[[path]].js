@@ -11,6 +11,9 @@
 //   POST   /products/:id/stock         {change, reason?, note?}
 //   GET    /products/:id/movements
 //   GET    /movements?limit=           (recent activity across all items)
+//   GET    /products/:id/photo         (JPEG bytes)
+//   PUT    /products/:id/photo         {data: base64 JPEG}
+//   DELETE /products/:id/photo
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS categories (
@@ -38,6 +41,11 @@ const SCHEMA = [
     qty_after INTEGER NOT NULL,
     reason TEXT, note TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE TABLE IF NOT EXISTS product_photos (
+    product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    mime TEXT NOT NULL,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
   `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
   `CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id, created_at)`,
 ];
@@ -112,8 +120,13 @@ function productValues(body) {
   };
 }
 
-const PRODUCT_SELECT = `SELECT p.*, c.name AS category FROM products p
-  JOIN categories c ON c.id = p.category_id`;
+const PRODUCT_SELECT = `SELECT p.*, c.name AS category,
+  (SELECT updated_at FROM product_photos ph WHERE ph.product_id = p.id) AS photo_v
+  FROM products p JOIN categories c ON c.id = p.category_id`;
+
+// Photos are resized in the browser (about 1000px JPEG, usually 100-250 KB) and kept in D1,
+// so no extra storage service has to be set up.
+const MAX_PHOTO_B64 = 1_400_000; // about 1 MB of image data
 
 async function getProduct(db, id) {
   const p = await db.prepare(PRODUCT_SELECT + " WHERE p.id = ?").bind(id).first();
@@ -233,6 +246,7 @@ async function route(request, env, parts) {
     if (method === "DELETE" && id !== null && !sub) {
       await db.batch([
         db.prepare("DELETE FROM movements WHERE product_id = ?").bind(id),
+        db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM products WHERE id = ?").bind(id),
       ]);
       return json({ ok: true });
@@ -253,6 +267,35 @@ async function route(request, env, parts) {
         .bind(id, change, updated.qty, clean(body.reason), clean(body.note)).run();
       return json(await getProduct(db, id));
     }
+    if (sub === "photo" && id !== null) {
+      if (method === "GET") {
+        const ph = await db.prepare("SELECT mime, data FROM product_photos WHERE product_id = ?").bind(id).first();
+        if (!ph) throw new HttpError(404, "No photo");
+        const bin = atob(ph.data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        // URLs carry ?v=<updated_at>, so the browser can cache each version for a long time.
+        return new Response(bytes, {
+          headers: { "content-type": ph.mime, "cache-control": "private, max-age=31536000, immutable" },
+        });
+      }
+      if (method === "PUT") {
+        await getProduct(db, id);
+        const body = await readBody(request);
+        const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(body.data || ""));
+        if (!m) throw new HttpError(400, "Photo must be a JPEG, PNG or WebP image");
+        if (m[2].length > MAX_PHOTO_B64) throw new HttpError(413, "Photo is too large (max about 1 MB)");
+        await db.prepare(
+          `INSERT INTO product_photos (product_id, mime, data, updated_at) VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(product_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`)
+          .bind(id, m[1], m[2]).run();
+        return json(await getProduct(db, id));
+      }
+      if (method === "DELETE") {
+        await db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id).run();
+        return json(await getProduct(db, id));
+      }
+    }
     if (method === "GET" && id !== null && sub === "movements") {
       const { results } = await db.prepare(
         "SELECT * FROM movements WHERE product_id = ? ORDER BY id DESC LIMIT 500").bind(id).all();
@@ -272,11 +315,24 @@ async function route(request, env, parts) {
   throw new HttpError(404, "Not found");
 }
 
+function cookie(request, name) {
+  const raw = request.headers.get("cookie") || "";
+  for (const part of raw.split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) {
+      try { return decodeURIComponent(part.slice(i + 1).trim()); } catch { return null; }
+    }
+  }
+  return null;
+}
+
 export async function onRequest({ request, env, params }) {
   try {
     if (!env.DB) throw new HttpError(500, "Database not connected. Add a D1 binding named DB (see README).");
     // Optional shared password: set APP_PASSWORD in the Pages project settings.
-    if (env.APP_PASSWORD && request.headers.get("x-app-password") !== env.APP_PASSWORD) {
+    // The password comes in a header (API calls) or a cookie (so <img> tags can load photos).
+    if (env.APP_PASSWORD && request.headers.get("x-app-password") !== env.APP_PASSWORD &&
+        cookie(request, "inv_pw") !== env.APP_PASSWORD) {
       throw new HttpError(401, "Wrong or missing password");
     }
     await ensureSchema(env.DB);
