@@ -52,3 +52,33 @@ CREATE TABLE IF NOT EXISTS product_photos (
 
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id, created_at);
+
+-- Emergency reports (photo taken on the spot by staff)
+CREATE TABLE IF NOT EXISTS incidents (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  type          TEXT NOT NULL,          -- Theft / robbery, Damaged piece, ...
+  note          TEXT,
+  product_id    INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  by_user       TEXT,
+  status        TEXT NOT NULL DEFAULT 'open',   -- open | resolved
+  resolved_by   TEXT,
+  resolved_note TEXT,
+  resolved_at   TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS incident_photos (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+  mime        TEXT NOT NULL,
+  data        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS incident_acks (       -- who tapped "I've seen it"
+  incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+  by_user     TEXT NOT NULL,
+  at          TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (incident_id, by_user)
+);
+
+CREATE INDEX IF NOT EXISTS idx_incident_photos ON incident_photos(incident_id);

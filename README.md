@@ -19,6 +19,11 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
 - **Search and filter** by name, code, metal or stone, and by category.
 - **Totals**: number of pieces, total weight, and stock value at selling price.
 - **Export CSV** opens in Excel or Google Sheets, so you can keep backups.
+- **🚨 Emergency reports**: a red button that's always on screen. Staff tap it, take a photo on the spot (or several), choose what happened (theft, suspicious person, damaged or missing piece, customer dispute, fire/medical/safety…), add a note and send.
+  - Everyone who has the app open gets a **full-screen red pop-up** within about 20 seconds, with the photo, a beep and a vibration. It stays until they tap "I've seen it".
+  - People who open the app later still get the pop-up for any report that's still open.
+  - The photo is also sent to **Telegram** (if set up), so the owner sees it even with the app closed.
+  - All reports are saved with photos, who sent them, who has seen them, and when and how each was resolved.
 - **Staff logins** (Cloudflare Access): each person signs in with their own email, and every stock change shows who did it, e.g. "−1 Sale · by Ayesha". Activity can be filtered by staff member. Only owners can delete items or categories.
 - Or a simpler **shared password**, if you don't want separate logins.
 
@@ -87,6 +92,8 @@ Without a staff name in `STAFF_NAMES`, the name is taken from the email (`ayesha
 
 ### Free-tier limits (more than enough for a shop)
 Pages: unlimited static requests. Functions: 100,000 requests/day. D1: 5 GB storage, 5 million reads per day.
+
+The app checks for new emergency reports every 20 seconds while it's open on screen (it pauses when the phone is locked or the tab is in the background). That's about 180 requests per hour per open device, so even 5 devices open for 12 hours a day use only about 11,000 of the 100,000 daily requests.
 
 ## Low-stock notifications on your phone (Telegram, free, about 5 minutes)
 

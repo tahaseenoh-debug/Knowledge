@@ -15,6 +15,12 @@
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
 //   GET    /me                          (who is signed in)
+//   GET    /incidents?after=&status=open|all   (emergency reports + open_count)
+//   POST   /incidents                   {type, note?, product_id?, photos: [dataUrl...]}
+//   POST   /incidents/:id/ack           ("I've seen it")
+//   POST   /incidents/:id/resolve       {note?}
+//   DELETE /incidents/:id               (owner)
+//   GET    /incident-photos/:id         (JPEG bytes)
 //   POST   /notify/test                 (send a test Telegram message)
 //   GET    /notify/chats                (list chats that messaged the bot, to find the chat ID)
 //
@@ -55,6 +61,26 @@ const SCHEMA = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
   `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
   `CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    note TEXT,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    by_user TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    resolved_by TEXT, resolved_note TEXT, resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE TABLE IF NOT EXISTS incident_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+    mime TEXT NOT NULL,
+    data TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS incident_acks (
+    incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+    by_user TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (incident_id, by_user))`,
+  `CREATE INDEX IF NOT EXISTS idx_incident_photos ON incident_photos(incident_id)`,
 ];
 
 // Columns added after the first version: added to existing databases automatically.
@@ -216,6 +242,37 @@ const PRODUCT_SELECT = `SELECT p.*, c.name AS category,
 // Photos are resized in the browser (about 1000px JPEG, usually 100-250 KB) and kept in D1,
 // so no extra storage service has to be set up.
 const MAX_PHOTO_B64 = 1_400_000; // about 1 MB of image data
+const MAX_INCIDENT_PHOTOS = 4;
+
+function parsePhoto(data) {
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(data || ""));
+  if (!m) throw new HttpError(400, "Photo must be a JPEG, PNG or WebP image");
+  if (m[2].length > MAX_PHOTO_B64) throw new HttpError(413, "Photo is too large (max about 1 MB)");
+  return { mime: m[1], b64: m[2] };
+}
+
+function b64Bytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+const INCIDENT_TYPES = ["Theft / robbery", "Suspicious person", "Damaged piece", "Missing piece",
+  "Customer dispute", "Fire / medical / safety", "Other"];
+
+const INCIDENT_SELECT = `SELECT i.*, p.code AS product_code, p.name AS product_name,
+  (SELECT json_group_array(ph.id) FROM incident_photos ph WHERE ph.incident_id = i.id) AS photo_ids,
+  (SELECT json_group_array(a.by_user) FROM incident_acks a WHERE a.incident_id = i.id) AS acks
+  FROM incidents i LEFT JOIN products p ON p.id = i.product_id`;
+
+const incidentRow = (r) => ({ ...r, photo_ids: JSON.parse(r.photo_ids || "[]"), acks: JSON.parse(r.acks || "[]") });
+
+async function getIncident(db, id) {
+  const r = await db.prepare(INCIDENT_SELECT + " WHERE i.id = ?").bind(id).first();
+  if (!r) throw new HttpError(404, "Report not found");
+  return incidentRow(r);
+}
 
 async function getProduct(db, id) {
   const p = await db.prepare(PRODUCT_SELECT + " WHERE p.id = ?").bind(id).first();
@@ -263,6 +320,19 @@ function lowStockMessage(p, oldQty, change, reason, by, siteUrl) {
   ].filter(Boolean).join("\n");
 }
 
+async function sendTelegramPhoto(env, b64, mime, caption) {
+  const chats = String(env.TELEGRAM_CHAT_ID).split(",").map((c) => c.trim()).filter(Boolean);
+  await Promise.all(chats.map(async (chat_id) => {
+    const form = new FormData();
+    form.append("chat_id", chat_id);
+    form.append("caption", caption.slice(0, 1000));
+    form.append("photo", new Blob([b64Bytes(b64)], { type: mime }), "report.jpg");
+    const res = await fetch(telegramUrl(env, "sendPhoto"), { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!data.ok) throw new Error(`Telegram sendPhoto to ${chat_id}: ${data.description || res.status}`);
+  }));
+}
+
 async function route(request, env, parts, user, waitUntil) {
   const by = user ? user.name : null;
   const db = env.DB;
@@ -304,6 +374,85 @@ async function route(request, env, parts, user, waitUntil) {
       return json([...chats.values()]);
     }
     throw new HttpError(404, "Not found");
+  }
+
+  // ---------- emergency reports ----------
+  if (resource === "incident-photos" && method === "GET" && id !== null) {
+    const ph = await db.prepare("SELECT mime, data FROM incident_photos WHERE id = ?").bind(id).first();
+    if (!ph) throw new HttpError(404, "No photo");
+    return new Response(b64Bytes(ph.data), {
+      headers: { "content-type": ph.mime, "cache-control": "private, max-age=31536000, immutable" },
+    });
+  }
+  if (resource === "incidents") {
+    if (method === "GET" && id === null) {
+      const where = [], args = [];
+      const after = int(url.searchParams.get("after"));
+      if (after !== null) { where.push("i.id > ?"); args.push(after); }
+      if (url.searchParams.get("status") !== "all") where.push("i.status = 'open'");
+      const limit = Math.min(Math.max(int(url.searchParams.get("limit"), 100), 1), 300);
+      const { results } = await db.prepare(INCIDENT_SELECT + (where.length ? " WHERE " + where.join(" AND ") : "") +
+        " ORDER BY i.id DESC LIMIT ?").bind(...args, limit).all();
+      const counts = await db.prepare(
+        "SELECT COUNT(*) AS open_count, MAX(id) AS max_id FROM incidents WHERE status = 'open'").first();
+      return json({ incidents: results.map(incidentRow), open_count: counts.open_count, max_open_id: counts.max_id });
+    }
+    if (method === "POST" && id === null) {
+      const body = await readBody(request);
+      const type = clean(body.type);
+      if (!type) throw new HttpError(400, "Choose what happened");
+      const photos = (Array.isArray(body.photos) ? body.photos : []).map(parsePhoto);
+      if (photos.length > MAX_INCIDENT_PHOTOS) throw new HttpError(400, `Up to ${MAX_INCIDENT_PHOTOS} photos per report`);
+      const note = clean(body.note);
+      if (!photos.length && !note) throw new HttpError(400, "Add a photo or a few words about what happened");
+      const productId = int(body.product_id);
+      const row = await db.prepare(
+        "INSERT INTO incidents (type, note, product_id, by_user) VALUES (?, ?, ?, ?) RETURNING id")
+        .bind(type, note, productId || null, by).first();
+      if (photos.length) {
+        await db.batch(photos.map((ph) => db.prepare(
+          "INSERT INTO incident_photos (incident_id, mime, data) VALUES (?, ?, ?)").bind(row.id, ph.mime, ph.b64)));
+      }
+      const inc = await getIncident(db, row.id);
+      if (telegramReady(env)) {
+        const caption = [
+          `🚨 EMERGENCY: ${inc.type}`,
+          inc.product_code ? `Item: ${inc.product_code} ${inc.product_name}` : null,
+          inc.note,
+          `Reported${by ? " by " + by : ""}`,
+          photos.length > 1 ? `(${photos.length} photos, see the app)` : null,
+          url.origin,
+        ].filter(Boolean).join("\n");
+        const send = photos.length
+          ? sendTelegramPhoto(env, photos[0].b64, photos[0].mime, caption)
+          : sendTelegram(env, caption);
+        waitUntil(send.catch((e) => console.error("Emergency alert failed:", e.message)));
+      }
+      return json(inc, 201);
+    }
+    if (method === "POST" && id !== null && sub === "ack") {
+      await getIncident(db, id);
+      await db.prepare("INSERT OR IGNORE INTO incident_acks (incident_id, by_user) VALUES (?, ?)")
+        .bind(id, by || "Someone").run();
+      return json(await getIncident(db, id));
+    }
+    if (method === "POST" && id !== null && sub === "resolve") {
+      const body = await readBody(request);
+      const r = await db.prepare(
+        `UPDATE incidents SET status = 'resolved', resolved_by = ?, resolved_note = ?, resolved_at = datetime('now')
+         WHERE id = ? RETURNING id`).bind(by, clean(body.note), id).first();
+      if (!r) throw new HttpError(404, "Report not found");
+      return json(await getIncident(db, id));
+    }
+    if (method === "DELETE" && id !== null && !sub) {
+      requireOwner(user, env);
+      await db.batch([
+        db.prepare("DELETE FROM incident_photos WHERE incident_id = ?").bind(id),
+        db.prepare("DELETE FROM incident_acks WHERE incident_id = ?").bind(id),
+        db.prepare("DELETE FROM incidents WHERE id = ?").bind(id),
+      ]);
+      return json({ ok: true });
+    }
   }
 
   // ---------- categories ----------
@@ -407,6 +556,7 @@ async function route(request, env, parts, user, waitUntil) {
       await db.batch([
         db.prepare("DELETE FROM movements WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
+        db.prepare("UPDATE incidents SET product_id = NULL WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM products WHERE id = ?").bind(id),
       ]);
       return json({ ok: true });
@@ -436,9 +586,7 @@ async function route(request, env, parts, user, waitUntil) {
       if (method === "GET") {
         const ph = await db.prepare("SELECT mime, data FROM product_photos WHERE product_id = ?").bind(id).first();
         if (!ph) throw new HttpError(404, "No photo");
-        const bin = atob(ph.data);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const bytes = b64Bytes(ph.data);
         // URLs carry ?v=<updated_at>, so the browser can cache each version for a long time.
         return new Response(bytes, {
           headers: { "content-type": ph.mime, "cache-control": "private, max-age=31536000, immutable" },
@@ -447,13 +595,11 @@ async function route(request, env, parts, user, waitUntil) {
       if (method === "PUT") {
         await getProduct(db, id);
         const body = await readBody(request);
-        const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(body.data || ""));
-        if (!m) throw new HttpError(400, "Photo must be a JPEG, PNG or WebP image");
-        if (m[2].length > MAX_PHOTO_B64) throw new HttpError(413, "Photo is too large (max about 1 MB)");
+        const photo = parsePhoto(body.data);
         await db.prepare(
           `INSERT INTO product_photos (product_id, mime, data, updated_at) VALUES (?, ?, ?, datetime('now'))
            ON CONFLICT(product_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`)
-          .bind(id, m[1], m[2]).run();
+          .bind(id, photo.mime, photo.b64).run();
         return json(await getProduct(db, id));
       }
       if (method === "DELETE") {

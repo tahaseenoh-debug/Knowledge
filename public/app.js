@@ -10,6 +10,9 @@ const state = {
   editing: null,   // product being edited
   stockItem: null, // product in stock dialog
   me: { owner: true },
+  report: { photos: [] }, // emergency report being written
+  alarmQueue: [],         // incoming reports waiting to be shown
+  openIncidents: 0,
   photo: null,     // pending photo in the item form: {dataUrl} to upload, "remove", or null for no change
 };
 
@@ -371,12 +374,13 @@ function removePhoto() {
   showPhotoPreview(null);
 }
 
-function openPhoto(p) {
-  $("#photo-big").src = photoUrl(p);
-  $("#photo-big").alt = p.name;
-  $("#photo-caption").textContent = `${p.code} · ${p.name}`;
+function openImage(src, caption) {
+  $("#photo-big").src = src;
+  $("#photo-big").alt = caption;
+  $("#photo-caption").textContent = caption;
   $("#dlg-photo").showModal();
 }
+const openPhoto = (p) => openImage(photoUrl(p), `${p.code} · ${p.name}`);
 
 // ---------- stock in / out ----------
 function setStockDir(dir) {
@@ -505,6 +509,217 @@ function remindLowOnce() {
   if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
 }
 
+// ---------- emergency reports ----------
+const INCIDENT_TYPES = ["Theft / robbery", "Suspicious person", "Damaged piece", "Missing piece",
+  "Customer dispute", "Fire / medical / safety", "Other"];
+const incPhotoUrl = (id) => `/api/incident-photos/${id}`;
+
+function getSeen() { try { return Number(localStorage.getItem("inc-seen")) || 0; } catch { return 0; } }
+function setSeen(id) { try { if (id > getSeen()) localStorage.setItem("inc-seen", String(id)); } catch {} }
+
+function timeAgo(s) {
+  const mins = Math.round((Date.now() - new Date(s.replace(" ", "T") + "Z")) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 24 * 60) return `${Math.round(mins / 60)} h ago`;
+  return fmtDate(s);
+}
+
+function updateSosBadge(n) {
+  state.openIncidents = n;
+  const b = $("#sos-n");
+  b.textContent = n;
+  b.hidden = !n;
+  $("#btn-all-reports").textContent = n ? `View all reports (${n} open)` : "View all reports";
+}
+
+function openReport() {
+  const form = $("#form-report");
+  form.reset();
+  state.report = { photos: [] };
+  renderReportPhotos();
+  $("#report-error").hidden = true;
+  $("#report-types").innerHTML = '<legend>What happened? *</legend>' + INCIDENT_TYPES.map((t) =>
+    `<label><input type="radio" name="type" value="${esc(t)}" required><span>${esc(t)}</span></label>`).join("");
+  $("#report-product").innerHTML = '<option value="">None</option>' + [...state.products]
+    .sort((a, b) => a.code.localeCompare(b.code))
+    .map((p) => `<option value="${p.id}">${esc(p.code)} · ${esc(p.name)}</option>`).join("");
+  $("#dlg-report").showModal();
+}
+
+function renderReportPhotos() {
+  $("#report-photos").innerHTML = state.report.photos.map((src, i) =>
+    `<div class="rp"><img src="${src}" alt="Photo ${i + 1}"><button type="button" data-i="${i}" aria-label="Remove photo">✕</button></div>`).join("");
+}
+
+async function addReportPhotos(e) {
+  const files = [...(e.target.files || [])];
+  e.target.value = "";
+  const err = $("#report-error");
+  err.hidden = true;
+  for (const f of files) {
+    if (state.report.photos.length >= 4) { showError(err, new Error("Up to 4 photos per report")); break; }
+    try { state.report.photos.push(await resizeImage(f)); } catch (e2) { showError(err, e2); }
+  }
+  renderReportPhotos();
+}
+
+async function sendReport(e) {
+  e.preventDefault();
+  const form = e.target, err = $("#report-error"), btn = form.querySelector("[type=submit]");
+  err.hidden = true;
+  if (!state.report.photos.length && !form.note.value.trim()) {
+    return showError(err, new Error("Take a photo or write a few words about what happened"));
+  }
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    const inc = await api("incidents", { method: "POST", body: {
+      type: form.type.value, note: form.note.value, product_id: form.product_id.value, photos: state.report.photos,
+    } });
+    setSeen(inc.id); // don't pop up our own report on this device
+    $("#dlg-report").close();
+    toast("🚨 Alert sent. Everyone using the app will see it.", 4000);
+    pollIncidents();
+  } catch (e2) {
+    showError(err, new Error(e2.message + ". Your report is still here; tap Send alert to try again."));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Send alert";
+  }
+}
+
+// Check for new reports every 20 seconds while the app is on screen.
+let polling = false;
+async function pollIncidents() {
+  if (polling) return;
+  polling = true;
+  try {
+    const seen = getSeen();
+    const res = await api(`incidents?status=open${seen ? "&after=" + seen : ""}`);
+    updateSosBadge(res.open_count);
+    const recentCutoff = Date.now() - 12 * 3600 * 1000;
+    const fresh = res.incidents
+      .filter((i) => !(state.me.signed_in && i.by_user === state.me.name))
+      .filter((i) => seen || new Date(i.created_at.replace(" ", "T") + "Z") > recentCutoff) // first visit: last 12 h only
+      .filter((i) => !state.alarmQueue.some((q) => q.id === i.id));
+    if (fresh.length) {
+      state.alarmQueue.push(...fresh.reverse()); // oldest first
+      if (!$("#dlg-alarm").open) showNextAlarm(true);
+      else renderAlarm();
+    }
+    if (!seen && res.max_open_id && !fresh.length) setSeen(res.max_open_id);
+  } catch (err) {
+    if (/signed out/i.test(err.message)) clearInterval(pollTimer);
+  } finally { polling = false; }
+}
+let pollTimer = null;
+function startPolling() {
+  pollIncidents();
+  pollTimer = setInterval(() => { if (document.visibilityState === "visible") pollIncidents(); }, 20000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pollIncidents(); });
+}
+
+function alarmSound() {
+  try { navigator.vibrate && navigator.vibrate([400, 150, 400, 150, 400]); } catch {}
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.35, 0.7].forEach((t) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "square"; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.15, ctx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.3);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.3);
+    });
+    setTimeout(() => ctx.close(), 1500);
+  } catch {}
+}
+
+function renderAlarm() {
+  const inc = state.alarmQueue[0];
+  if (!inc) return;
+  const photos = inc.photo_ids.map((id) =>
+    `<button type="button" data-src="${incPhotoUrl(id)}"><img src="${incPhotoUrl(id)}" alt="Report photo"></button>`).join("");
+  const more = state.alarmQueue.length - 1;
+  $("#alarm-body").innerHTML = `
+    <p class="alarm-type">${esc(inc.type)}</p>
+    <p class="alarm-meta">${inc.by_user ? "Reported by <b>" + esc(inc.by_user) + "</b> · " : ""}${esc(timeAgo(inc.created_at))}
+      ${inc.product_code ? " · Item " + esc(inc.product_code) + " " + esc(inc.product_name) : ""}</p>
+    ${inc.note ? `<p class="alarm-note">${esc(inc.note)}</p>` : ""}
+    ${photos ? `<div class="alarm-photos ${inc.photo_ids.length === 1 ? "one" : ""}">${photos}</div>` : ""}
+    ${more > 0 ? `<p class="alarm-more">+ ${more} more report${more > 1 ? "s" : ""} waiting</p>` : ""}`;
+}
+
+function showNextAlarm(sound) {
+  if (!state.alarmQueue.length) { $("#dlg-alarm").open && $("#dlg-alarm").close(); return; }
+  renderAlarm();
+  // Shown on top of anything else that's open, so nobody loses a half-filled form.
+  if (!$("#dlg-alarm").open) $("#dlg-alarm").showModal();
+  if (sound) alarmSound();
+}
+
+async function ackAlarm() {
+  const inc = state.alarmQueue.shift();
+  if (inc) {
+    setSeen(inc.id);
+    api(`incidents/${inc.id}/ack`, { method: "POST", body: {} }).catch(() => {});
+  }
+  showNextAlarm(false);
+}
+
+function reportHtml(inc) {
+  const thumbs = inc.photo_ids.map((id) =>
+    `<button type="button" data-src="${incPhotoUrl(id)}"><img src="${incPhotoUrl(id)}" alt="" loading="lazy"></button>`).join("");
+  const resolved = inc.status === "resolved";
+  return `<article class="report ${resolved ? "resolved" : ""}" data-id="${inc.id}">
+    <div class="top"><span class="ty">${esc(inc.type)}</span><span class="st">${resolved ? "Resolved" : "OPEN"}</span></div>
+    <div class="meta">${inc.by_user ? "By " + esc(inc.by_user) + " · " : ""}${esc(fmtDate(inc.created_at))}
+      ${inc.product_code ? " · " + esc(inc.product_code) + " " + esc(inc.product_name) : ""}</div>
+    ${inc.note ? `<div>${esc(inc.note)}</div>` : ""}
+    ${thumbs ? `<div class="thumbs">${thumbs}</div>` : ""}
+    <div class="meta">${inc.acks.length ? "👀 Seen by " + inc.acks.map(esc).join(", ") : "Not seen by anyone yet"}</div>
+    ${resolved ? `<div class="meta">✅ Resolved${inc.resolved_by ? " by " + esc(inc.resolved_by) : ""} · ${esc(fmtDate(inc.resolved_at))}${inc.resolved_note ? " · " + esc(inc.resolved_note) : ""}</div>` : ""}
+    <div class="acts">
+      ${resolved ? "" : '<button type="button" class="ghost" data-act="resolve">✓ Mark resolved</button>'}
+      ${state.me.owner ? '<button type="button" class="ghost danger" data-act="delete">Delete</button>' : ""}
+    </div>
+  </article>`;
+}
+
+async function openReports() {
+  document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-reports" && d.close());
+  if (!$("#dlg-reports").open) $("#dlg-reports").showModal();
+  const list = $("#reports-list");
+  list.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const openOnly = $("#reports-open-only").checked;
+    const res = await api(`incidents?status=${openOnly ? "open" : "all"}`);
+    updateSosBadge(res.open_count);
+    list.innerHTML = res.incidents.map(reportHtml).join("") ||
+      `<p class="ok-msg">${openOnly ? "No open emergencies. 👍" : "No reports yet."}</p>`;
+  } catch (err) { list.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+async function reportAction(e) {
+  const img = e.target.closest("[data-src]");
+  if (img) return openImage(img.dataset.src, "Emergency report photo");
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.closest(".report").dataset.id;
+  try {
+    if (btn.dataset.act === "resolve") {
+      const note = prompt("What was done? (optional)", "");
+      if (note === null) return;
+      await api(`incidents/${id}/resolve`, { method: "POST", body: { note } });
+    } else if (btn.dataset.act === "delete") {
+      if (!confirm("Delete this report and its photos?")) return;
+      await api(`incidents/${id}`, { method: "DELETE" });
+    }
+    openReports();
+  } catch (err) { toast(err.message, 4000); }
+}
+
 async function loadMe() {
   try { state.me = await api("me"); } catch (err) { if (err.message.includes("signed out")) throw err; return; }
   const box = $("#me");
@@ -578,6 +793,25 @@ function wire() {
   $("#btn-delete-item").onclick = deleteItem;
   $("#photo-input").onchange = pickPhoto;
   $("#btn-alerts").onclick = openAlerts;
+  $("#btn-sos").onclick = openReport;
+  $("#report-camera").onchange = addReportPhotos;
+  $("#report-gallery").onchange = addReportPhotos;
+  $("#report-photos").onclick = (e) => {
+    const b = e.target.closest("button[data-i]");
+    if (b) { state.report.photos.splice(Number(b.dataset.i), 1); renderReportPhotos(); }
+  };
+  $("#form-report").onsubmit = sendReport;
+  $("#btn-all-reports").onclick = openReports;
+  $("#btn-new-report").onclick = () => { $("#dlg-reports").close(); openReport(); };
+  $("#reports-open-only").onchange = openReports;
+  $("#reports-list").onclick = reportAction;
+  $("#btn-alarm-ack").onclick = ackAlarm;
+  $("#btn-alarm-list").onclick = () => { for (const i of state.alarmQueue) setSeen(i.id); state.alarmQueue = []; openReports(); };
+  $("#dlg-alarm").addEventListener("cancel", (e) => e.preventDefault()); // must be acknowledged
+  $("#alarm-body").onclick = (e) => {
+    const b = e.target.closest("[data-src]");
+    if (b) openImage(b.dataset.src, "Emergency report photo");
+  };
   $("#btn-test-notify").onclick = testNotify;
   $("#btn-find-chat").onclick = findChats;
   $("#alerts-list").onclick = (e) => {
@@ -629,7 +863,7 @@ function wire() {
 }
 
 wire();
-loadMe().then(refresh).then(remindLowOnce).catch((err) => {
+loadMe().then(refresh).then(() => { remindLowOnce(); startPolling(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;

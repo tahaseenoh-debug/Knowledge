@@ -33,6 +33,65 @@
     <p id="empty" class="empty" hidden></p>
   </main>
 
+  <button class="sos-fab" id="btn-sos" type="button" aria-label="Emergency report">
+    <span aria-hidden="true">🚨</span><b>Emergency</b><span class="sos-n" id="sos-n" hidden></span>
+  </button>
+
+  <!-- New emergency report -->
+  <dialog id="dlg-report" class="danger-dlg">
+    <form id="form-report" method="dialog">
+      <h2>🚨 Emergency report</h2>
+      <div class="cam-row">
+        <label class="camera-btn">📷 Take photo
+          <input type="file" id="report-camera" accept="image/*" capture="environment" hidden>
+        </label>
+        <label class="gallery-btn">🖼 From gallery
+          <input type="file" id="report-gallery" accept="image/*" multiple hidden>
+        </label>
+      </div>
+      <div class="report-photos" id="report-photos"></div>
+      <fieldset class="types" id="report-types">
+        <legend>What happened? *</legend>
+      </fieldset>
+      <label>Details<textarea name="note" rows="2" placeholder="What happened, where, who is involved…"></textarea></label>
+      <label>Related item (optional)<select name="product_id" id="report-product"></select></label>
+      <p class="error" id="report-error" hidden></p>
+      <div class="actions">
+        <button type="button" class="linkbtn" id="btn-all-reports">View all reports</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="sos-send">Send alert</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Pop-up shown to everyone when a report comes in -->
+  <dialog id="dlg-alarm" class="alarm-dlg">
+    <div class="dlg-body">
+      <div class="alarm-head">🚨 EMERGENCY</div>
+      <div id="alarm-body"></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-alarm-list">View all reports</button>
+        <span class="spacer"></span>
+        <button type="button" class="primary" id="btn-alarm-ack">✓ I've seen it</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- All reports -->
+  <dialog id="dlg-reports">
+    <div class="dlg-body">
+      <h2>🚨 Emergency reports</h2>
+      <div class="row wrap">
+        <label class="check"><input type="checkbox" id="reports-open-only" checked> Open only</label>
+        <span class="spacer"></span>
+        <button type="button" class="sos-send" id="btn-new-report">+ New report</button>
+      </div>
+      <div id="reports-list" class="reports"></div>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
   <!-- Add / edit item -->
   <dialog id="dlg-item">
     <form id="form-item" method="dialog">
