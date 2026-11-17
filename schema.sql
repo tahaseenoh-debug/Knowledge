@@ -82,3 +82,10 @@ CREATE TABLE IF NOT EXISTS incident_acks (       -- who tapped "I've seen it"
 );
 
 CREATE INDEX IF NOT EXISTS idx_incident_photos ON incident_photos(incident_id);
+
+-- Photo fingerprints for "search by photo" (made in the browser by the image model)
+CREATE TABLE IF NOT EXISTS photo_vectors (
+  product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+  photo_v    TEXT NOT NULL,   -- which version of the photo this was made from
+  vec        TEXT NOT NULL    -- 1280 signed bytes, base64
+);

@@ -15,6 +15,8 @@
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
 //   GET    /me                          (who is signed in)
+//   GET    /photo-index                 (photo fingerprints for search by photo)
+//   PUT    /products/:id/photo-vec      {vec, v}  (fingerprint for the current photo)
 //   GET    /incidents?after=&status=open|all   (emergency reports + open_count)
 //   POST   /incidents                   {type, note?, product_id?, photos: [dataUrl...]}
 //   POST   /incidents/:id/ack           ("I've seen it")
@@ -81,6 +83,10 @@ const SCHEMA = [
     at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (incident_id, by_user))`,
   `CREATE INDEX IF NOT EXISTS idx_incident_photos ON incident_photos(incident_id)`,
+  `CREATE TABLE IF NOT EXISTS photo_vectors (
+    product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    photo_v TEXT NOT NULL,
+    vec TEXT NOT NULL)`,
 ];
 
 // Columns added after the first version: added to existing databases automatically.
@@ -236,7 +242,8 @@ function productValues(body) {
 }
 
 const PRODUCT_SELECT = `SELECT p.*, c.name AS category,
-  (SELECT updated_at FROM product_photos ph WHERE ph.product_id = p.id) AS photo_v
+  (SELECT updated_at FROM product_photos ph WHERE ph.product_id = p.id) AS photo_v,
+  (SELECT photo_v FROM photo_vectors pv WHERE pv.product_id = p.id) AS vec_v
   FROM products p JOIN categories c ON c.id = p.category_id`;
 
 // Photos are resized in the browser (about 1000px JPEG, usually 100-250 KB) and kept in D1,
@@ -256,6 +263,17 @@ function b64Bytes(b64) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
+}
+
+// Photo fingerprint: 1280 numbers from the image model, made in the browser and stored as
+// base64 signed bytes. Used only for "search by photo".
+const VEC_LEN = 1280;
+function parseVec(v) {
+  if (typeof v !== "string" || !/^[A-Za-z0-9+/=]+$/.test(v)) throw new HttpError(400, "Invalid photo fingerprint");
+  let len;
+  try { len = atob(v).length; } catch { throw new HttpError(400, "Invalid photo fingerprint"); }
+  if (len !== VEC_LEN) throw new HttpError(400, "Invalid photo fingerprint size");
+  return v;
 }
 
 const INCIDENT_TYPES = ["Theft / robbery", "Suspicious person", "Damaged piece", "Missing piece",
@@ -374,6 +392,14 @@ async function route(request, env, parts, user, waitUntil) {
       return json([...chats.values()]);
     }
     throw new HttpError(404, "Not found");
+  }
+
+  // ---------- search by photo ----------
+  if (resource === "photo-index" && method === "GET" && id === null) {
+    const { results } = await db.prepare(
+      `SELECT pv.product_id AS id, pv.vec FROM photo_vectors pv
+       JOIN product_photos ph ON ph.product_id = pv.product_id AND ph.updated_at = pv.photo_v`).all();
+    return json(results);
   }
 
   // ---------- emergency reports ----------
@@ -556,6 +582,7 @@ async function route(request, env, parts, user, waitUntil) {
       await db.batch([
         db.prepare("DELETE FROM movements WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
+        db.prepare("DELETE FROM photo_vectors WHERE product_id = ?").bind(id),
         db.prepare("UPDATE incidents SET product_id = NULL WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM products WHERE id = ?").bind(id),
       ]);
@@ -600,12 +627,33 @@ async function route(request, env, parts, user, waitUntil) {
           `INSERT INTO product_photos (product_id, mime, data, updated_at) VALUES (?, ?, ?, datetime('now'))
            ON CONFLICT(product_id) DO UPDATE SET mime = excluded.mime, data = excluded.data, updated_at = excluded.updated_at`)
           .bind(id, photo.mime, photo.b64).run();
+        const p = await getProduct(db, id);
+        if (body.vec) {
+          await db.prepare("INSERT OR REPLACE INTO photo_vectors (product_id, photo_v, vec) VALUES (?, ?, ?)")
+            .bind(id, p.photo_v, parseVec(body.vec)).run();
+        } else {
+          await db.prepare("DELETE FROM photo_vectors WHERE product_id = ?").bind(id).run();
+        }
         return json(await getProduct(db, id));
       }
       if (method === "DELETE") {
-        await db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id).run();
+        await db.batch([
+          db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
+          db.prepare("DELETE FROM photo_vectors WHERE product_id = ?").bind(id),
+        ]);
         return json(await getProduct(db, id));
       }
+    }
+    if (method === "PUT" && id !== null && sub === "photo-vec") {
+      const body = await readBody(request);
+      const vec = parseVec(body.vec);
+      // Only store it if it was made from the photo that's there now.
+      const r = await db.prepare(
+        `INSERT OR REPLACE INTO photo_vectors (product_id, photo_v, vec)
+         SELECT product_id, updated_at, ? FROM product_photos WHERE product_id = ? AND updated_at = ?
+         RETURNING product_id`).bind(vec, id, String(body.v || "")).first();
+      if (!r) throw new HttpError(409, "The photo changed. Reload and try again.");
+      return json({ ok: true });
     }
     if (method === "GET" && id !== null && sub === "movements") {
       const { results } = await db.prepare(

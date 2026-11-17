@@ -307,10 +307,12 @@ async function saveItem(e) {
     } else if (state.photo) {
       await api(`products/${p.id}/photo`, { method: "PUT", body: { data: state.photo.dataUrl } });
     }
+    const photoChanged = !!state.photo;
     state.photo = null;
     toast(body._isNew ? `Added ${p.code}` : `Saved ${p.code}`);
     $("#dlg-item").close();
     await refresh();
+    if (photoChanged) indexSoon();
   } catch (err) { showError($("#item-error"), err); }
   finally { btn.disabled = false; }
 }
@@ -507,6 +509,226 @@ function remindLowOnce() {
   try { if (sessionStorage.getItem("low-reminded")) return; sessionStorage.setItem("low-reminded", "1"); } catch {}
   const n = lowItems().length;
   if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
+}
+
+// ---------- search by photo ----------
+// A small image model (MobileNet V2, bundled under /vendor) turns each photo into 1280 numbers
+// (a "fingerprint"). Photos of the same piece give similar fingerprints, so we compare them.
+const EMB_NODE = "module_apply_default/MobilenetV2/Logits/AvgPool";
+let visionPromise = null;
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = resolve;
+    s.onerror = () => reject(new Error("Couldn't load photo search. Check the internet connection."));
+    document.head.appendChild(s);
+  });
+}
+
+function loadVision() {
+  if (!visionPromise) {
+    visionPromise = (async () => {
+      if (!window.tf) await loadScript("/vendor/tf.min.js");
+      const model = await tf.loadGraphModel("/vendor/mobilenet_v2/model.json");
+      tf.tidy(() => { model.execute(tf.zeros([1, 224, 224, 3]), EMB_NODE); }); // warm up
+      return model;
+    })().catch((err) => { visionPromise = null; throw err; });
+  }
+  return visionPromise;
+}
+
+function loadImg(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Couldn't read photo"));
+    img.src = src;
+  });
+}
+
+// Returns a unit-length Float32Array fingerprint for an image URL or data URL.
+async function fingerprint(src) {
+  const model = await loadVision();
+  const img = await loadImg(src);
+  const side = Math.min(img.naturalWidth, img.naturalHeight); // centre square crop
+  const c = document.createElement("canvas");
+  c.width = c.height = 224;
+  c.getContext("2d").drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 224, 224);
+  const out = tf.tidy(() => {
+    const x = tf.browser.fromPixels(c).toFloat().div(255).expandDims(0);
+    return model.execute(x, EMB_NODE).reshape([-1]);
+  });
+  const v = await out.data();
+  out.dispose();
+  let n = 0;
+  for (const x of v) n += x * x;
+  n = Math.sqrt(n) || 1;
+  return Float32Array.from(v, (x) => x / n);
+}
+
+function packVec(v) {
+  let max = 0;
+  for (const x of v) max = Math.max(max, Math.abs(x));
+  const q = Int8Array.from(v, (x) => Math.round((x / (max || 1)) * 127));
+  return btoa(String.fromCharCode(...new Uint8Array(q.buffer)));
+}
+
+function cosine(query, b64) {
+  const bin = atob(b64);
+  let dot = 0, nn = 0;
+  for (let i = 0; i < bin.length; i++) {
+    const b = (bin.charCodeAt(i) << 24) >> 24; // to signed byte
+    dot += query[i] * b; nn += b * b;
+  }
+  return nn ? dot / Math.sqrt(nn) : 0;
+}
+
+// Make fingerprints for item photos that don't have one yet (e.g. photos added before this feature).
+let indexing = null;
+function ensureIndexed(onProgress) {
+  if (!indexing) {
+    indexing = (async () => {
+      const todo = state.products.filter((p) => p.photo_v && p.vec_v !== p.photo_v);
+      let done = 0;
+      for (const p of todo) {
+        onProgress && onProgress(done, todo.length);
+        try {
+          const vec = packVec(await fingerprint(photoUrl(p)));
+          await api(`products/${p.id}/photo-vec`, { method: "PUT", body: { vec, v: p.photo_v } });
+          p.vec_v = p.photo_v;
+        } catch (err) { console.warn("Couldn't index", p.code, err.message); }
+        done++;
+      }
+      onProgress && onProgress(done, todo.length);
+    })().finally(() => { indexing = null; });
+  }
+  return indexing;
+}
+
+const psStatus = (msg) => { $("#ps-status").textContent = msg; };
+
+async function openPhotoSearch() {
+  $("#ps-query").hidden = true;
+  $("#ps-results").innerHTML = "";
+  $("#ps-add").hidden = true;
+  state.psQuery = null;
+  $("#dlg-psearch").showModal();
+  await preparePhotoSearch();
+}
+
+async function preparePhotoSearch() {
+  const withPhoto = state.products.filter((p) => p.photo_v).length;
+  if (!withPhoto) {
+    psStatus("No items have photos yet. Add photos to your items (Edit → Add photo) so they can be found by photo.");
+    return false;
+  }
+  try {
+    psStatus(window.tf ? "Getting ready…" : "Getting photo search ready… (the first time downloads about 15 MB)");
+    await loadVision();
+    await ensureIndexed((done, total) => {
+      if (total) psStatus(`Learning your item photos: ${done} of ${total}…`);
+    });
+    const missing = state.products.length - withPhoto;
+    psStatus(`Ready. Searching ${withPhoto} item${withPhoto > 1 ? "s" : ""} with photos` +
+      (missing ? ` (${missing} without a photo can't be found this way).` : "."));
+    return true;
+  } catch (err) {
+    psStatus(err.message);
+    return false;
+  }
+}
+
+async function runPhotoSearch(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  $("#ps-results").innerHTML = ""; // clear old results straight away
+  $("#ps-add").hidden = true;
+  psStatus("Reading photo…");
+  try {
+    const dataUrl = await resizeImage(file);
+    state.psQuery = dataUrl;
+    $("#ps-query").innerHTML = `<img src="${dataUrl}" alt="Your photo"><span class="muted">Your photo</span>`;
+    $("#ps-query").hidden = false;
+    $("#ps-results").innerHTML = "";
+    if (!(await preparePhotoSearch())) { $("#ps-add").hidden = false; return; }
+    psStatus("Comparing…");
+    const [query, index] = await Promise.all([fingerprint(dataUrl), api("photo-index")]);
+    const byId = new Map(state.products.map((p) => [p.id, p]));
+    const matches = index
+      .map((r) => ({ p: byId.get(r.id), s: cosine(query, r.vec) }))
+      .filter((m) => m.p)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 8);
+    renderPhotoMatches(matches);
+    $("#ps-add").hidden = false;
+  } catch (err) { psStatus(err.message); }
+}
+
+// Scores depend on lighting and background, so the top result is judged against the runner-up too.
+function matchLabel(s, i, matches) {
+  const next = matches[1] ? matches[1].s : 0;
+  if (i === 0 && (s >= 0.8 || (s >= 0.55 && s - next >= 0.05))) return ["hi", "Best match"];
+  if (s >= 0.6) return ["mid", "Possible"];
+  return ["lo", "Unlikely"];
+}
+
+function renderPhotoMatches(matches) {
+  const best = matches.length && matchLabel(matches[0].s, 0, matches)[0] === "hi";
+  psStatus(best ? "Found it? Check the best match below:" : matches.some((m) => m.s >= 0.6)
+    ? "A few possible matches. Check them below:"
+    : "No close match. Check the items below, or add it as a new item.");
+  $("#ps-results").innerHTML = matches.map(({ p, s }, i) => {
+    const [cls, label] = matchLabel(s, i, matches);
+    return `<div class="ps-row ${cls === "lo" ? "weak" : ""}" data-id="${p.id}">
+      <img src="${photoUrl(p)}" alt="">
+      <div class="nm"><b>${esc(p.code)}</b> ${esc(p.name)}
+        <small>${esc(p.category)}${p.colour ? " · " + esc(p.colour) : ""} · ${p.qty} in stock</small>
+        <span class="score ${cls}">${label} · ${Math.round(Math.max(0, s) * 100)}%</span></div>
+      <div class="btns">
+        <button type="button" class="ghost" data-act="show">Show</button>
+        <button type="button" class="minus" data-act="out" aria-label="Stock out" ${p.qty === 0 ? "disabled" : ""}>−</button>
+        <button type="button" class="plus" data-act="in" aria-label="Stock in">+</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function photoMatchAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  const row = e.target.closest(".ps-row");
+  if (!row) return;
+  const p = state.products.find((x) => x.id === Number(row.dataset.id));
+  const act = btn ? btn.dataset.act : "show";
+  $("#dlg-psearch").close();
+  if (act === "show") showItem(p);
+  else openStock(p, act);
+}
+
+// Filter the list to one item and highlight it.
+function showItem(p) {
+  state.activeCat = null;
+  state.lowOnly = false;
+  $("#low-only").checked = false;
+  $("#search").value = p.code;
+  state.search = p.code;
+  renderChips();
+  render();
+  const el = document.querySelector(`.item[data-id="${p.id}"]`);
+  if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("flash"); }
+}
+
+function addFromPhotoSearch() {
+  const dataUrl = state.psQuery;
+  $("#dlg-psearch").close();
+  openItem();
+  if (dataUrl) { state.photo = { dataUrl }; showPhotoPreview(dataUrl); }
+}
+
+// After a photo is saved, make its fingerprint straight away if the model is already loaded.
+function indexSoon() {
+  if (visionPromise) ensureIndexed().catch(() => {});
 }
 
 // ---------- emergency reports ----------
@@ -793,6 +1015,11 @@ function wire() {
   $("#btn-delete-item").onclick = deleteItem;
   $("#photo-input").onchange = pickPhoto;
   $("#btn-alerts").onclick = openAlerts;
+  $("#btn-photo-search").onclick = openPhotoSearch;
+  $("#ps-camera").onchange = runPhotoSearch;
+  $("#ps-gallery").onchange = runPhotoSearch;
+  $("#ps-results").onclick = photoMatchAction;
+  $("#ps-add").onclick = addFromPhotoSearch;
   $("#btn-sos").onclick = openReport;
   $("#report-camera").onchange = addReportPhotos;
   $("#report-gallery").onchange = addReportPhotos;

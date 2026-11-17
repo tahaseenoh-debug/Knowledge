@@ -25,6 +25,7 @@
 
     <section class="filters">
       <input type="search" id="search" placeholder="Search by name, code, metal, colour, stone…" autocomplete="off">
+      <button class="ghost photo-search-btn" id="btn-photo-search" type="button">📷 Search by photo</button>
       <label class="check"><input type="checkbox" id="low-only"> Low stock only</label>
     </section>
     <nav class="chips" id="chips" aria-label="Categories"></nav>
@@ -63,6 +64,30 @@
         <button type="submit" class="sos-send">Send alert</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Search by photo -->
+  <dialog id="dlg-psearch">
+    <div class="dlg-body">
+      <h2>📷 Search by photo</h2>
+      <p class="muted">Take a picture of the piece. For best results, fill the frame with it and use a plain background.</p>
+      <div class="cam-row">
+        <label class="camera-btn neutral">📷 Take photo
+          <input type="file" id="ps-camera" accept="image/*" capture="environment" hidden>
+        </label>
+        <label class="gallery-btn">🖼 From gallery
+          <input type="file" id="ps-gallery" accept="image/*" hidden>
+        </label>
+      </div>
+      <p class="muted" id="ps-status" role="status"></p>
+      <div class="ps-query" id="ps-query" hidden></div>
+      <div class="ps-results" id="ps-results"></div>
+      <div class="actions">
+        <button type="button" class="ghost" id="ps-add" hidden>➕ Not found? Add as new item</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Close</button>
+      </div>
+    </div>
   </dialog>
 
   <!-- Pop-up shown to everyone when a report comes in -->

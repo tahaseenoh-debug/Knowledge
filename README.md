@@ -16,7 +16,12 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
   - a reminder when you open the app if anything is low
   - **Telegram messages to your phone** (optional, free), even when the app is closed
   - each item has its own alert level, and there's a "Low stock only" filter
-- **Search and filter** by name, code, metal or stone, and by category.
+- **Search and filter** by name, code, metal, colour or stone, and by category.
+- **📷 Search by photo**: when staff can't find a piece by name, they take a picture of it and the app shows the closest-looking saved items, best match first, with buttons to show the item or do stock in/out straight from the results. If it isn't there, **Add as new item** opens the form with that photo already filled in.
+  - It works by comparing photos with a small image-recognition model that runs **inside the phone's browser** (bundled in `public/vendor/`). It's free, has no setup or API keys, and photos don't leave your site.
+  - The first time someone uses it, the phone downloads about 15 MB (once, then it's kept). After that a search takes well under a second.
+  - It can only find items **that have a photo**. Photos you add are learned automatically.
+  - Best results: fill the frame with the piece, use a plain background, and take item photos the same way.
 - **Totals**: number of pieces, total weight, and stock value at selling price.
 - **Export CSV** opens in Excel or Google Sheets, so you can keep backups.
 - **🚨 Emergency reports**: a red button that's always on screen. Staff tap it, take a photo on the spot (or several), choose what happened (theft, suspicious person, damaged or missing piece, customer dispute, fire/medical/safety…), add a note and send.
@@ -129,6 +134,7 @@ npx wrangler pages dev
 
 ```
 public/            the web app (HTML, CSS, JS, no build step)
+public/vendor/     TensorFlow.js + image model for search by photo (see its README)
 functions/api/     the API (Cloudflare Pages Function)
 schema.sql         database tables (created automatically)
 wrangler.toml      Cloudflare config (put your D1 ID here)
