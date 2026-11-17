@@ -12,6 +12,7 @@
     <h1>💎 Jewellery Inventory</h1>
     <div class="me" id="me" hidden></div>
     <div class="top-actions">
+      <button class="ghost bell" id="btn-alerts" type="button" aria-label="Low stock alerts" title="Low stock alerts">🔔<span class="bell-n" id="bell-n" hidden></span></button>
       <button class="ghost" id="btn-activity" type="button">Activity</button>
       <button class="ghost" id="btn-categories" type="button">Categories</button>
       <button class="ghost" id="btn-export" type="button" title="Download as CSV (opens in Excel)">Export</button>
@@ -119,6 +120,24 @@
         <select id="history-user"><option value="">Everyone</option></select>
       </label>
       <div id="history-list" class="history"></div>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Low stock alerts -->
+  <dialog id="dlg-alerts">
+    <div class="dlg-body">
+      <h2>🔔 Low stock alerts</h2>
+      <div id="alerts-list" class="alerts"></div>
+      <section id="notify-box" class="notify-box" hidden>
+        <h3>Phone notifications (Telegram)</h3>
+        <p class="muted" id="notify-status"></p>
+        <div class="row wrap">
+          <button type="button" class="ghost" id="btn-find-chat">Find chat ID</button>
+          <button type="button" class="primary" id="btn-test-notify">Send test message</button>
+        </div>
+        <div id="notify-result"></div>
+      </section>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
     </div>
   </dialog>

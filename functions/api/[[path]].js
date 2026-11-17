@@ -15,6 +15,8 @@
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
 //   GET    /me                          (who is signed in)
+//   POST   /notify/test                 (send a test Telegram message)
+//   GET    /notify/chats                (list chats that messaged the bot, to find the chat ID)
 //
 // Sign-in: put Cloudflare Access in front of the site and set ACCESS_TEAM_DOMAIN and
 // ACCESS_AUD; each request's Access token is then checked here, and the staff
@@ -140,8 +142,8 @@ function isOwner(user, env) {
   return !!user && owners.includes(user.email);
 }
 
-function requireOwner(user, env) {
-  if (!isOwner(user, env)) throw new HttpError(403, "Only the owner can delete. Ask the owner to do this.");
+function requireOwner(user, env, what = "delete") {
+  if (!isOwner(user, env)) throw new HttpError(403, `Only the owner can ${what}. Ask the owner to do this.`);
 }
 
 const PRODUCT_FIELDS = [
@@ -225,14 +227,50 @@ async function readBody(request) {
   try { return await request.json(); } catch { throw new HttpError(400, "Invalid JSON body"); }
 }
 
-async function route(request, env, parts, user) {
+// ---------- low-stock notifications (Telegram) ----------
+const telegramReady = (env) => !!(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID);
+const telegramUrl = (env, method) =>
+  `${env.TELEGRAM_API_BASE || "https://api.telegram.org"}/bot${env.TELEGRAM_BOT_TOKEN.trim()}/${method}`;
+
+async function sendTelegram(env, text) {
+  const chats = String(env.TELEGRAM_CHAT_ID).split(",").map((c) => c.trim()).filter(Boolean);
+  const results = await Promise.all(chats.map(async (chat_id) => {
+    const res = await fetch(telegramUrl(env, "sendMessage"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id, text, disable_web_page_preview: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    return data.ok ? null : `${chat_id}: ${data.description || res.status}`;
+  }));
+  const errors = results.filter(Boolean);
+  if (errors.length) throw new Error("Telegram said: " + errors.join("; "));
+}
+
+// A message is sent only when a stock-out makes an item cross its alert level, not on every sale.
+function lowStockMessage(p, oldQty, change, reason, by, siteUrl) {
+  const crossedLow = oldQty > p.low_stock && p.qty <= p.low_stock;
+  const becameZero = oldQty > 0 && p.qty === 0;
+  if (!crossedLow && !becameZero) return null;
+  const head = p.qty === 0 ? "🔴 OUT OF STOCK" : "⚠️ Low stock";
+  const details = [p.category, [p.metal, p.purity].filter(Boolean).join(" "), p.colour].filter(Boolean).join(" · ");
+  return [
+    `${head}: ${p.code} ${p.name}`,
+    details,
+    `${p.qty} left (alert at ${p.low_stock})`,
+    `Last change: ${change} ${reason || ""}${by ? " by " + by : ""}`.trim(),
+    siteUrl,
+  ].filter(Boolean).join("\n");
+}
+
+async function route(request, env, parts, user, waitUntil) {
   const by = user ? user.name : null;
   const db = env.DB;
   const method = request.method;
   const url = new URL(request.url);
   const [resource, idStr, sub] = parts;
   const id = idStr !== undefined ? Number(idStr) : null;
-  if (idStr !== undefined && !Number.isInteger(id)) throw new HttpError(404, "Not found");
+  if (idStr !== undefined && !Number.isInteger(id) && resource !== "notify") throw new HttpError(404, "Not found");
 
   // ---------- auth check endpoint ----------
   if (resource === "ping") return json({ ok: true });
@@ -240,7 +278,32 @@ async function route(request, env, parts, user) {
     return json({
       signed_in: !!user, email: user && user.email, name: user && user.name,
       owner: isOwner(user, env), access: !!(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD),
+      telegram: telegramReady(env), telegram_token: !!env.TELEGRAM_BOT_TOKEN,
     });
+  }
+
+  if (resource === "notify") {
+    requireOwner(user, env, "manage notifications");
+    if (!env.TELEGRAM_BOT_TOKEN) throw new HttpError(400, "TELEGRAM_BOT_TOKEN isn't set yet (see README).");
+    if (idStr === "test" && method === "POST") {
+      if (!env.TELEGRAM_CHAT_ID) throw new HttpError(400, "TELEGRAM_CHAT_ID isn't set yet. Use 'Find chat ID' first.");
+      try {
+        await sendTelegram(env, `✅ Test from Jewellery Inventory${by ? " (sent by " + by + ")" : ""}.\nLow-stock alerts will arrive here.`);
+      } catch (e) { throw new HttpError(502, e.message); }
+      return json({ ok: true });
+    }
+    if (idStr === "chats" && method === "GET") {
+      const res = await fetch(telegramUrl(env, "getUpdates"));
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) throw new HttpError(502, "Telegram said: " + (data.description || res.status) + ". Check the bot token.");
+      const chats = new Map();
+      for (const u of data.result || []) {
+        const c = (u.message || u.channel_post || u.my_chat_member || {}).chat;
+        if (c) chats.set(c.id, { id: String(c.id), name: c.title || [c.first_name, c.last_name].filter(Boolean).join(" ") || c.username, type: c.type });
+      }
+      return json([...chats.values()]);
+    }
+    throw new HttpError(404, "Not found");
   }
 
   // ---------- categories ----------
@@ -362,7 +425,12 @@ async function route(request, env, parts, user) {
       await db.prepare(
         "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(id, change, updated.qty, clean(body.reason), clean(body.note), by).run();
-      return json(await getProduct(db, id));
+      const product = await getProduct(db, id);
+      const oldQty = updated.qty - change;
+      const msg = telegramReady(env) && lowStockMessage(product, oldQty, change, clean(body.reason), by, url.origin);
+      // Sent in the background so the stock update returns straight away.
+      if (msg) waitUntil(sendTelegram(env, msg).catch((e) => console.error("Low-stock alert failed:", e.message)));
+      return json(product);
     }
     if (sub === "photo" && id !== null) {
       if (method === "GET") {
@@ -426,7 +494,7 @@ function cookie(request, name) {
   return null;
 }
 
-export async function onRequest({ request, env, params }) {
+export async function onRequest({ request, env, params, waitUntil }) {
   try {
     if (!env.DB) throw new HttpError(500, "Database not connected. Add a D1 binding named DB (see README).");
     // Optional shared password: set APP_PASSWORD in the Pages project settings.
@@ -442,7 +510,7 @@ export async function onRequest({ request, env, params }) {
     }
     await ensureSchema(env.DB);
     const parts = Array.isArray(params.path) ? params.path : params.path ? [params.path] : [];
-    return await route(request, env, parts, user);
+    return await route(request, env, parts, user, waitUntil);
   } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status);
     if (String(err && err.message).includes("UNIQUE")) return json({ error: "That already exists" }, 409);

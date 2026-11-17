@@ -90,12 +90,12 @@ function showPasswordPrompt() {
   });
 }
 
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => t.classList.remove("show"), 2200);
+  toast.t = setTimeout(() => t.classList.remove("show"), ms);
 }
 
 function showError(el, err) { el.textContent = err.message || String(err); el.hidden = false; }
@@ -133,7 +133,18 @@ function visibleProducts() {
   });
 }
 
+const lowItems = () => state.products.filter((p) => p.qty <= p.low_stock)
+  .sort((a, b) => a.qty - b.qty || a.name.localeCompare(b.name));
+
+function updateBell() {
+  const n = lowItems().length, badge = $("#bell-n");
+  badge.textContent = n > 99 ? "99+" : n;
+  badge.hidden = n === 0;
+  $("#btn-alerts").title = n ? `${n} item(s) low on stock` : "No low-stock items";
+}
+
 function render() {
+  updateBell();
   renderStats();
   const list = $("#list"), empty = $("#empty");
   const items = visibleProducts();
@@ -401,7 +412,10 @@ async function saveStock(e) {
       method: "POST", body: { change, reason: form.reason.value, note: form.note.value },
     });
     $("#dlg-stock").close();
-    toast(`${p.code}: ${change > 0 ? "+" : ""}${change} → ${p.qty} in stock`);
+    const old = p.qty - change;
+    if (change < 0 && p.qty === 0) toast(`🔴 ${p.code} ${p.name} is now OUT OF STOCK`, 5000);
+    else if (change < 0 && p.qty <= p.low_stock && old > p.low_stock) toast(`⚠️ ${p.code} ${p.name} is now low: only ${p.qty} left`, 5000);
+    else toast(`${p.code}: ${change > 0 ? "+" : ""}${change} → ${p.qty} in stock`);
     await refresh();
   } catch (e2) { showError(err, e2); }
   finally { btn.disabled = false; }
@@ -437,6 +451,58 @@ async function openHistory(product, user = "") {
     }
     $("#history-list").innerHTML = rows.map((m) => movementHtml(m, !product)).join("") || '<p class="muted">No stock movements yet.</p>';
   } catch (err) { $("#history-list").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+// ---------- low stock alerts ----------
+function openAlerts() {
+  const items = lowItems();
+  $("#alerts-list").innerHTML = items.map((p) => `
+    <div class="alert-row ${p.qty === 0 ? "zero" : ""}" data-id="${p.id}">
+      <span class="nm"><b>${esc(p.code)}</b> ${esc(p.name)}<small>${esc(p.category)}${p.colour ? " · " + esc(p.colour) : ""}</small></span>
+      <span class="q">${p.qty === 0 ? "Out" : p.qty + " left"}<small>alert at ${p.low_stock}</small></span>
+      <button type="button" data-act="restock" aria-label="Add stock">+</button>
+    </div>`).join("") || '<p class="ok-msg">All good. Nothing is low on stock. 🎉</p>';
+  renderNotifyBox();
+  $("#dlg-alerts").showModal();
+}
+
+function renderNotifyBox() {
+  const me = state.me, box = $("#notify-box");
+  box.hidden = !me.owner;
+  $("#notify-result").innerHTML = "";
+  $("#btn-find-chat").hidden = !me.telegram_token;
+  $("#btn-test-notify").hidden = !me.telegram;
+  $("#notify-status").innerHTML = me.telegram
+    ? "✅ On. A Telegram message is sent when an item drops to its alert level or sells out."
+    : me.telegram_token
+      ? "Almost done: send any message to your bot in Telegram, tap <b>Find chat ID</b>, then save it as <code>TELEGRAM_CHAT_ID</code> in Cloudflare."
+      : "Off. To get alerts on your phone even when the app is closed, follow <b>Low-stock notifications</b> in the README (about 5 minutes).";
+}
+
+async function testNotify() {
+  const out = $("#notify-result");
+  try {
+    await api("notify/test", { method: "POST", body: {} });
+    out.innerHTML = '<p class="ok-msg">Sent! Check Telegram.</p>';
+  } catch (err) { out.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+async function findChats() {
+  const out = $("#notify-result");
+  out.innerHTML = '<p class="muted">Checking…</p>';
+  try {
+    const chats = await api("notify/chats");
+    out.innerHTML = chats.length
+      ? '<p class="muted">Copy the number for the chat you want and save it as <code>TELEGRAM_CHAT_ID</code> (comma-separate several):</p>' +
+        chats.map((c) => `<div class="chat-opt"><span>${esc(c.name || "Chat")} <small class="muted">(${esc(c.type)})</small></span><code>${esc(c.id)}</code></div>`).join("")
+      : '<p class="error">No chats found. Open your bot in Telegram, press Start or send it "hi", then try again. For a group, add the bot to the group and send a message there.</p>';
+  } catch (err) { out.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+function remindLowOnce() {
+  try { if (sessionStorage.getItem("low-reminded")) return; sessionStorage.setItem("low-reminded", "1"); } catch {}
+  const n = lowItems().length;
+  if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
 }
 
 async function loadMe() {
@@ -511,6 +577,16 @@ function wire() {
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
   $("#photo-input").onchange = pickPhoto;
+  $("#btn-alerts").onclick = openAlerts;
+  $("#btn-test-notify").onclick = testNotify;
+  $("#btn-find-chat").onclick = findChats;
+  $("#alerts-list").onclick = (e) => {
+    const b = e.target.closest("[data-act=restock]");
+    if (!b) return;
+    const p = state.products.find((x) => x.id === Number(b.closest(".alert-row").dataset.id));
+    $("#dlg-alerts").close();
+    openStock(p, "in");
+  };
   $("#history-user").onchange = (e) => openHistory(null, e.target.value);
   $("#btn-remove-photo").onclick = removePhoto;
   $("#form-item").onsubmit = saveItem;
@@ -553,7 +629,7 @@ function wire() {
 }
 
 wire();
-loadMe().then(refresh).catch((err) => {
+loadMe().then(refresh).then(remindLowOnce).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;

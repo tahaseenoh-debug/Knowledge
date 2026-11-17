@@ -10,7 +10,12 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
 - **History**: every movement is logged per item, and **Activity** shows recent changes across all items.
 - **Photos**: take a picture with the phone camera or pick one from the gallery. It's shrunk automatically to about 100–250 KB and saved in the same free database, so there's nothing extra to set up. Tap a thumbnail to see it full size.
 - **Jewellery details**: metal, purity (22K / 18K / 925…), colour (shown with a small colour dot), weight in grams, stone, size, cost and selling price, supplier, notes.
-- **Low-stock alerts**: each item has its own threshold, with a "Low stock only" filter.
+- **Low-stock notifications**:
+  - a 🔔 bell with a red count of items that are low or sold out; tap it to see the list and restock with one tap
+  - a warning pop-up the moment a sale makes an item low ("⚠️ RIN-0001 is now low: only 1 left")
+  - a reminder when you open the app if anything is low
+  - **Telegram messages to your phone** (optional, free), even when the app is closed
+  - each item has its own alert level, and there's a "Low stock only" filter
 - **Search and filter** by name, code, metal or stone, and by category.
 - **Totals**: number of pieces, total weight, and stock value at selling price.
 - **Export CSV** opens in Excel or Google Sheets, so you can keep backups.
@@ -82,6 +87,29 @@ Without a staff name in `STAFF_NAMES`, the name is taken from the email (`ayesha
 
 ### Free-tier limits (more than enough for a shop)
 Pages: unlimited static requests. Functions: 100,000 requests/day. D1: 5 GB storage, 5 million reads per day.
+
+## Low-stock notifications on your phone (Telegram, free, about 5 minutes)
+
+When a sale makes an item reach its alert level, or sell out, a message like this is sent:
+
+```
+⚠️ Low stock: RIN-0001 Gold heart ring
+Rings · Gold 22K · Rose gold
+2 left (alert at 2)
+Last change: -1 Sale by Ayesha
+```
+
+You get one message when the item reaches its alert level and one when it sells out, not one for every sale, so you won't be spammed.
+
+1. **Create a bot**: in Telegram, search for **@BotFather** → send `/newbot` → pick a name (e.g. "My Shop Stock") and a username ending in `bot`. BotFather replies with a **token** like `123456789:AAH...`.
+2. **Give the token to the app**: Pages project → **Settings → Variables and Secrets** → add a **Secret** `TELEGRAM_BOT_TOKEN` = the token → redeploy.
+3. **Say hi to your bot**: open your new bot in Telegram and press **Start**.
+   *To alert your staff as well:* create a Telegram group, add the bot to it, and send `/start` in the group.
+4. **Find the chat ID**: in the app (signed in as owner) tap 🔔 → **Find chat ID**. Copy the number shown (a group's number starts with `-`).
+5. **Save it**: add a **Secret** `TELEGRAM_CHAT_ID` = that number. For several chats, separate them with commas, e.g. `5551234,-100777`. Then redeploy.
+6. **Test it**: 🔔 → **Send test message**. You should get a ✅ message in Telegram.
+
+Keep the bot token private: anyone who has it can send messages as your bot.
 
 ## Run locally
 
