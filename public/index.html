@@ -10,6 +10,7 @@
 <body>
   <header class="topbar">
     <h1>💎 Jewellery Inventory</h1>
+    <div class="me" id="me" hidden></div>
     <div class="top-actions">
       <button class="ghost" id="btn-activity" type="button">Activity</button>
       <button class="ghost" id="btn-categories" type="button">Categories</button>
@@ -22,7 +23,7 @@
     <section class="stats" id="stats"></section>
 
     <section class="filters">
-      <input type="search" id="search" placeholder="Search by name, code, metal, stone…" autocomplete="off">
+      <input type="search" id="search" placeholder="Search by name, code, metal, colour, stone…" autocomplete="off">
       <label class="check"><input type="checkbox" id="low-only"> Low stock only</label>
     </section>
     <nav class="chips" id="chips" aria-label="Categories"></nav>
@@ -60,9 +61,12 @@
         <label>Purity
           <input name="purity" list="purities" placeholder="22K, 18K, 925…">
         </label>
+        <label>Colour
+          <input name="colour" list="colours" placeholder="Yellow, Rose, Green…">
+        </label>
         <label>Weight (g)<input name="weight_g" type="number" step="0.001" min="0" inputmode="decimal"></label>
         <label>Size<input name="size" placeholder="Ring size, length…"></label>
-        <label class="full">Stone / gem<input name="stone" placeholder="Diamond 0.25ct, Ruby…"></label>
+        <label>Stone / gem<input name="stone" placeholder="Diamond 0.25ct, Ruby…"></label>
         <label>Cost price<input name="cost_price" type="number" step="0.01" min="0" inputmode="decimal"></label>
         <label>Selling price<input name="sell_price" type="number" step="0.01" min="0" inputmode="decimal"></label>
         <label>Supplier<input name="supplier" list="suppliers"></label>
@@ -111,6 +115,9 @@
   <dialog id="dlg-history">
     <div class="dlg-body">
       <h2 id="history-title">History</h2>
+      <label id="history-filter" hidden>Staff
+        <select id="history-user"><option value="">Everyone</option></select>
+      </label>
       <div id="history-list" class="history"></div>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
     </div>
@@ -157,7 +164,14 @@
     <option>24K</option><option>22K</option><option>21K</option><option>18K</option><option>14K</option>
     <option>925</option><option>950</option>
   </datalist>
+  <datalist id="colours">
+    <option>Yellow gold</option><option>Rose gold</option><option>White gold</option><option>Silver</option>
+    <option>Two-tone</option><option>Multicolour</option><option>White</option><option>Black</option>
+    <option>Red</option><option>Green</option><option>Blue</option><option>Pink</option><option>Purple</option>
+    <option>Pearl white</option>
+  </datalist>
   <datalist id="suppliers"></datalist>
+  <div id="banner" class="banner" hidden></div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="app.js"></script>

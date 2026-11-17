@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS products (
   category_id INTEGER NOT NULL REFERENCES categories(id),
   metal       TEXT,
   purity      TEXT,
+  colour      TEXT,
   weight_g    REAL,
   stone       TEXT,
   size        TEXT,
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS products (
   supplier    TEXT,
   low_stock   INTEGER NOT NULL DEFAULT 1,
   notes       TEXT,
+  created_by  TEXT,
   qty         INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -37,6 +39,7 @@ CREATE TABLE IF NOT EXISTS movements (
   qty_after  INTEGER NOT NULL,
   reason     TEXT,
   note       TEXT,
+  by_user    TEXT,              -- staff member who made the change
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

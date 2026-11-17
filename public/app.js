@@ -9,6 +9,7 @@ const state = {
   lowOnly: false,
   editing: null,   // product being edited
   stockItem: null, // product in stock dialog
+  me: { owner: true },
   photo: null,     // pending photo in the item form: {dataUrl} to upload, "remove", or null for no change
 };
 
@@ -37,14 +38,31 @@ function setPassword(p) { try { localStorage.setItem("inv-pw", p); } catch {} se
 if (getPassword()) setPasswordCookie(getPassword());
 const photoUrl = (p) => `/api/products/${p.id}/photo?v=${encodeURIComponent(p.photo_v)}`;
 
+function signedOut() {
+  const b = $("#banner");
+  b.innerHTML = 'You\'ve been signed out. <button type="button">Sign in again</button>';
+  b.querySelector("button").onclick = () => location.reload();
+  b.hidden = false;
+  return new Error("You've been signed out, so this wasn't saved. Reload the page to sign in again.");
+}
+
 async function api(path, opts = {}) {
-  const res = await fetch("/api/" + path, {
-    method: opts.method || "GET",
-    headers: { "content-type": "application/json", "x-app-password": getPassword() },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch("/api/" + path, {
+      method: opts.method || "GET",
+      headers: { "content-type": "application/json", "x-app-password": getPassword() },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      redirect: "manual",
+    });
+  } catch {
+    throw new Error("Couldn't reach the server. Check the internet connection.");
+  }
+  // An expired Cloudflare Access login answers with a redirect to the sign-in page.
+  if (res.type === "opaqueredirect") throw signedOut();
   let data = null;
   try { data = await res.json(); } catch {}
+  if (res.status === 401 && data && data.auth === "access") throw signedOut();
   if (res.status === 401) { await askPassword(); return api(path, opts); }
   if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
   return data;
@@ -108,7 +126,7 @@ function visibleProducts() {
     if (state.activeCat && p.category_id !== state.activeCat) return false;
     if (state.lowOnly && p.qty > p.low_stock) return false;
     if (q) {
-      const hay = [p.code, p.name, p.category, p.metal, p.purity, p.stone, p.size, p.supplier, p.notes].join(" ").toLowerCase();
+      const hay = [p.code, p.name, p.category, p.metal, p.purity, p.colour, p.stone, p.size, p.supplier, p.notes].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -134,10 +152,11 @@ function itemHtml(p) {
   const meta = [
     p.category,
     [p.metal, p.purity].filter(Boolean).join(" "),
+    p.colour ? "COLOUR:" + p.colour : "",
     p.weight_g != null ? fmtNum(p.weight_g, 3) + " g" : "",
     p.stone, p.size ? "Size " + p.size : "",
     p.sell_price != null ? "Price " + fmtNum(p.sell_price) : "",
-  ].filter(Boolean).map(esc).join(" · ");
+  ].filter(Boolean).map((x) => x.startsWith("COLOUR:") ? colourHtml(x.slice(7)) : esc(x)).join(" · ");
   const cls = p.qty === 0 ? "zero" : p.qty <= p.low_stock ? "low" : "";
   const badge = p.qty === 0 ? '<span class="badge out">Out of stock</span>' : p.qty <= p.low_stock ? '<span class="badge">Low stock</span>' : "";
   const thumb = p.photo_v
@@ -159,6 +178,17 @@ function itemHtml(p) {
       <button class="plus" data-act="in" aria-label="Stock in">+</button>
     </div>
   </article>`;
+}
+
+// A small colour dot next to the colour name, when the colour is recognised.
+const COLOUR_HINTS = { "yellow gold": "#d4a72c", "rose gold": "#c98b7a", "white gold": "#e6e6e6", gold: "#d4a72c",
+  silver: "#c0c0c0", "pearl white": "#f4efe6", "two-tone": "linear-gradient(90deg,#d4a72c 50%,#c0c0c0 50%)",
+  multicolour: "conic-gradient(red,orange,yellow,green,blue,purple,red)" };
+function colourHtml(c) {
+  const key = c.trim().toLowerCase();
+  let bg = COLOUR_HINTS[key];
+  if (!bg && CSS.supports("color", key.replace(/\s+/g, ""))) bg = key.replace(/\s+/g, "");
+  return (bg ? `<span class="swatch" style="background:${esc(bg)}"></span>` : "") + esc(c);
 }
 
 function renderStats() {
@@ -198,8 +228,8 @@ function renderCatList() {
       <span class="pfx">${esc(c.prefix)}</span>
       <span class="nm">${esc(c.name)}</span>
       <span class="ct">${c.items} items · ${c.pieces} pcs</span>
-      <button class="ghost" data-act="rename">Rename</button>
-      <button class="ghost danger" data-act="delete" ${c.items ? "disabled title='Has items'" : ""}>Delete</button>
+      ${state.me.owner ? `<button class="ghost" data-act="rename">Rename</button>
+      <button class="ghost danger" data-act="delete" ${c.items ? "disabled title='Has items'" : ""}>Delete</button>` : ""}
     </li>`).join("") || `<li class="muted">No categories yet.</li>`;
 }
 
@@ -217,7 +247,7 @@ function openItem(product = null) {
   $("#item-title").textContent = product ? "Edit item" : "Add item";
   $("#item-code").hidden = !product;
   $("#item-code").textContent = product ? "Code: " + product.code : "";
-  $("#btn-delete-item").hidden = !product;
+  $("#btn-delete-item").hidden = !product || !state.me.owner;
   $("#opening-wrap").hidden = !!product;
   renderCategorySelect(product ? product.category_id : state.activeCat || "");
   state.photo = null;
@@ -381,19 +411,44 @@ async function saveStock(e) {
 function movementHtml(m, withItem) {
   const dir = m.change > 0 ? "in" : "out";
   const title = withItem ? `<b>${esc(m.code)}</b> ${esc(m.name)}` : esc(m.reason || (dir === "in" ? "Stock in" : "Stock out"));
-  const sub = [withItem ? m.reason : null, m.note, `Balance ${m.qty_after}`].filter(Boolean).map(esc).join(" · ");
+  const sub = [m.by_user ? `<span class="by">by ${esc(m.by_user)}</span>` : "",
+    ...[withItem ? m.reason : null, m.note, `Balance ${m.qty_after}`].filter(Boolean).map(esc)].filter(Boolean).join(" · ");
   return `<div class="mv"><span class="chg ${dir}">${m.change > 0 ? "+" : ""}${m.change}</span>
     <span class="what">${title}<small>${sub}</small></span><span class="when">${fmtDate(m.created_at)}</span></div>`;
 }
 
-async function openHistory(product) {
+async function openHistory(product, user = "") {
   $("#history-title").textContent = product ? `${product.code} · ${product.name}` : "Recent activity";
   $("#history-list").innerHTML = '<p class="muted">Loading…</p>';
-  $("#dlg-history").showModal();
+  if (!$("#dlg-history").open) $("#dlg-history").showModal();
+  $("#history-filter").hidden = true;
   try {
-    const rows = product ? await api(`products/${product.id}/movements`) : await api("movements?limit=200");
+    let rows;
+    if (product) {
+      rows = await api(`products/${product.id}/movements`);
+    } else {
+      const res = await api("movements?limit=200" + (user ? "&user=" + encodeURIComponent(user) : ""));
+      rows = res.movements;
+      if (res.staff.length) {
+        $("#history-user").innerHTML = '<option value="">Everyone</option>' +
+          res.staff.map((n) => `<option ${n === user ? "selected" : ""}>${esc(n)}</option>`).join("");
+        $("#history-filter").hidden = false;
+      }
+    }
     $("#history-list").innerHTML = rows.map((m) => movementHtml(m, !product)).join("") || '<p class="muted">No stock movements yet.</p>';
   } catch (err) { $("#history-list").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+async function loadMe() {
+  try { state.me = await api("me"); } catch (err) { if (err.message.includes("signed out")) throw err; return; }
+  const box = $("#me");
+  if (state.me.signed_in) {
+    box.innerHTML = `<span>👤 <b>${esc(state.me.name)}</b></span>` +
+      (state.me.owner ? '<span class="role">Owner</span>' : '<span class="role">Staff</span>') +
+      '<a href="/cdn-cgi/access/logout">Sign out</a>';
+    box.title = state.me.email;
+    box.hidden = false;
+  }
 }
 
 // ---------- categories dialog ----------
@@ -433,7 +488,7 @@ async function catAction(e) {
 
 // ---------- CSV export ----------
 function exportCsv() {
-  const cols = ["code", "name", "category", "metal", "purity", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "qty", "low_stock", "notes", "created_at", "updated_at"];
+  const cols = ["code", "name", "category", "metal", "purity", "colour", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "qty", "low_stock", "notes", "created_by", "created_at", "updated_at"];
   const cell = (v) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -456,6 +511,7 @@ function wire() {
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
   $("#photo-input").onchange = pickPhoto;
+  $("#history-user").onchange = (e) => openHistory(null, e.target.value);
   $("#btn-remove-photo").onclick = removePhoto;
   $("#form-item").onsubmit = saveItem;
   $("#form-stock").onsubmit = saveStock;
@@ -497,7 +553,7 @@ function wire() {
 }
 
 wire();
-refresh().catch((err) => {
+loadMe().then(refresh).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;

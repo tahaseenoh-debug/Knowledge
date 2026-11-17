@@ -14,6 +14,11 @@
 //   GET    /products/:id/photo         (JPEG bytes)
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
+//   GET    /me                          (who is signed in)
+//
+// Sign-in: put Cloudflare Access in front of the site and set ACCESS_TEAM_DOMAIN and
+// ACCESS_AUD; each request's Access token is then checked here, and the staff
+// member's email is saved on every stock change. OWNER_EMAILS limits deleting to owners.
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS categories (
@@ -27,10 +32,10 @@ const SCHEMA = [
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     category_id INTEGER NOT NULL REFERENCES categories(id),
-    metal TEXT, purity TEXT, weight_g REAL, stone TEXT, size TEXT,
+    metal TEXT, purity TEXT, colour TEXT, weight_g REAL, stone TEXT, size TEXT,
     cost_price REAL, sell_price REAL, supplier TEXT,
     low_stock INTEGER NOT NULL DEFAULT 1,
-    notes TEXT,
+    notes TEXT, created_by TEXT,
     qty INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
@@ -39,7 +44,7 @@ const SCHEMA = [
     product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     change INTEGER NOT NULL,
     qty_after INTEGER NOT NULL,
-    reason TEXT, note TEXT,
+    reason TEXT, note TEXT, by_user TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
   `CREATE TABLE IF NOT EXISTS product_photos (
     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
@@ -50,20 +55,102 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_movements_product ON movements(product_id, created_at)`,
 ];
 
+// Columns added after the first version: added to existing databases automatically.
+const ADDED_COLUMNS = [
+  ["products", "colour", "TEXT"],
+  ["products", "created_by", "TEXT"],
+  ["movements", "by_user", "TEXT"],
+];
+
 let schemaReady = false;
 async function ensureSchema(db) {
   if (schemaReady) return;
   await db.batch(SCHEMA.map((s) => db.prepare(s)));
+  for (const [table, col, type] of ADDED_COLUMNS) {
+    const { results } = await db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!results.some((r) => r.name === col)) {
+      await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`).run();
+    }
+  }
   schemaReady = true;
 }
 
+// ---------- Cloudflare Access sign-in ----------
+const b64urlBytes = (s) => {
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(s.length / 4) * 4, "="));
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+};
+const b64urlJson = (s) => JSON.parse(new TextDecoder().decode(b64urlBytes(s)));
+
+function teamUrl(env) {
+  const d = env.ACCESS_TEAM_DOMAIN.trim().replace(/\/+$/, "");
+  return d.includes("://") ? d : "https://" + d;
+}
+
+let certCache = { url: null, at: 0, keys: [] };
+async function accessKeys(env, force = false) {
+  const url = teamUrl(env) + "/cdn-cgi/access/certs";
+  if (!force && certCache.url === url && Date.now() - certCache.at < 3600_000) return certCache.keys;
+  const res = await fetch(url);
+  if (!res.ok) throw new HttpError(500, "Couldn't load Cloudflare Access keys. Check ACCESS_TEAM_DOMAIN.");
+  const { keys } = await res.json();
+  certCache = { url, at: Date.now(), keys };
+  return keys;
+}
+
+async function verifyAccess(request, env) {
+  const token = request.headers.get("cf-access-jwt-assertion") || cookie(request, "CF_Authorization");
+  const fail = () => { throw new HttpError(401, "You're signed out. Reload the page to sign in again.", { auth: "access" }); };
+  if (!token) fail();
+  const parts = token.split(".");
+  if (parts.length !== 3) fail();
+  let header, payload;
+  try { header = b64urlJson(parts[0]); payload = b64urlJson(parts[1]); } catch { fail(); }
+  if (header.alg !== "RS256") fail();
+  let jwk = (await accessKeys(env)).find((k) => k.kid === header.kid);
+  if (!jwk) jwk = (await accessKeys(env, true)).find((k) => k.kid === header.kid); // keys rotated
+  if (!jwk) fail();
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, b64urlBytes(parts[2]),
+    new TextEncoder().encode(parts[0] + "." + parts[1]));
+  if (!ok) fail();
+  const now = Math.floor(Date.now() / 1000);
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!aud.includes(env.ACCESS_AUD.trim())) fail();
+  if (payload.iss !== teamUrl(env)) fail();
+  if (!payload.exp || payload.exp < now - 30) fail();
+  if (!payload.email) fail();
+  return String(payload.email).toLowerCase();
+}
+
+function displayName(email, env) {
+  if (!email) return null;
+  // Optional STAFF_NAMES: "ayesha@gmail.com=Ayesha, ali@gmail.com=Ali"
+  for (const pair of String(env.STAFF_NAMES || "").split(",")) {
+    const [e, n] = pair.split("=").map((x) => x && x.trim());
+    if (e && n && e.toLowerCase() === email) return n;
+  }
+  const local = email.split("@")[0].replace(/[._-]+/g, " ");
+  return local.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function isOwner(user, env) {
+  const owners = String(env.OWNER_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  if (!owners.length) return true;         // no owners listed: everyone can do everything
+  return !!user && owners.includes(user.email);
+}
+
+function requireOwner(user, env) {
+  if (!isOwner(user, env)) throw new HttpError(403, "Only the owner can delete. Ask the owner to do this.");
+}
+
 const PRODUCT_FIELDS = [
-  "name", "category_id", "metal", "purity", "weight_g", "stone", "size",
+  "name", "category_id", "metal", "purity", "colour", "weight_g", "stone", "size",
   "cost_price", "sell_price", "supplier", "low_stock", "notes",
 ];
 
 class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, extra) { super(message); this.status = status; this.extra = extra; }
 }
 
 const json = (data, status = 200) =>
@@ -111,7 +198,7 @@ function productValues(body) {
   if (!category_id) throw new HttpError(400, "Category is required");
   return {
     name, category_id,
-    metal: clean(body.metal), purity: clean(body.purity),
+    metal: clean(body.metal), purity: clean(body.purity), colour: clean(body.colour),
     weight_g: num(body.weight_g), stone: clean(body.stone), size: clean(body.size),
     cost_price: num(body.cost_price), sell_price: num(body.sell_price),
     supplier: clean(body.supplier),
@@ -138,7 +225,8 @@ async function readBody(request) {
   try { return await request.json(); } catch { throw new HttpError(400, "Invalid JSON body"); }
 }
 
-async function route(request, env, parts) {
+async function route(request, env, parts, user) {
+  const by = user ? user.name : null;
   const db = env.DB;
   const method = request.method;
   const url = new URL(request.url);
@@ -148,6 +236,12 @@ async function route(request, env, parts) {
 
   // ---------- auth check endpoint ----------
   if (resource === "ping") return json({ ok: true });
+  if (resource === "me") {
+    return json({
+      signed_in: !!user, email: user && user.email, name: user && user.name,
+      owner: isOwner(user, env), access: !!(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD),
+    });
+  }
 
   // ---------- categories ----------
   if (resource === "categories") {
@@ -171,6 +265,7 @@ async function route(request, env, parts) {
       return json(row, 201);
     }
     if (method === "PUT" && id !== null) {
+      requireOwner(user, env);
       const body = await readBody(request);
       const name = clean(body.name);
       if (!name) throw new HttpError(400, "Category name is required");
@@ -181,6 +276,7 @@ async function route(request, env, parts) {
       return json(row);
     }
     if (method === "DELETE" && id !== null) {
+      requireOwner(user, env);
       const used = await db.prepare("SELECT COUNT(*) AS n FROM products WHERE category_id = ?").bind(id).first();
       if (used.n > 0) throw new HttpError(409, `This category still has ${used.n} item(s). Move or delete them first.`);
       await db.prepare("DELETE FROM categories WHERE id = ?").bind(id).run();
@@ -194,9 +290,9 @@ async function route(request, env, parts) {
       const where = [], args = [];
       const q = clean(url.searchParams.get("q"));
       if (q) {
-        where.push("(p.name LIKE ? OR p.code LIKE ? OR p.metal LIKE ? OR p.stone LIKE ? OR p.notes LIKE ?)");
+        where.push("(p.name LIKE ? OR p.code LIKE ? OR p.metal LIKE ? OR p.colour LIKE ? OR p.stone LIKE ? OR p.notes LIKE ?)");
         const like = `%${q}%`;
-        args.push(like, like, like, like, like);
+        args.push(like, like, like, like, like, like);
       }
       const cat = int(url.searchParams.get("category"));
       if (cat) { where.push("p.category_id = ?"); args.push(cat); }
@@ -219,13 +315,13 @@ async function route(request, env, parts) {
       if (!cat) throw new HttpError(400, "Category not found");
       const code = `${cat.prefix}-${String(cat.next_num).padStart(4, "0")}`;
       const row = await db.prepare(
-        `INSERT INTO products (code, ${PRODUCT_FIELDS.join(", ")}, qty)
-         VALUES (?, ${PRODUCT_FIELDS.map(() => "?").join(", ")}, ?) RETURNING id`)
-        .bind(code, ...PRODUCT_FIELDS.map((f) => v[f]), openingQty).first();
+        `INSERT INTO products (code, ${PRODUCT_FIELDS.join(", ")}, qty, created_by)
+         VALUES (?, ${PRODUCT_FIELDS.map(() => "?").join(", ")}, ?, ?) RETURNING id`)
+        .bind(code, ...PRODUCT_FIELDS.map((f) => v[f]), openingQty, by).first();
       if (openingQty > 0) {
         await db.prepare(
-          "INSERT INTO movements (product_id, change, qty_after, reason, note) VALUES (?, ?, ?, 'Opening stock', NULL)")
-          .bind(row.id, openingQty, openingQty).run();
+          "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user) VALUES (?, ?, ?, 'Opening stock', NULL, ?)")
+          .bind(row.id, openingQty, openingQty, by).run();
       }
       return json(await getProduct(db, row.id), 201);
     }
@@ -244,6 +340,7 @@ async function route(request, env, parts) {
       return json(await getProduct(db, id));
     }
     if (method === "DELETE" && id !== null && !sub) {
+      requireOwner(user, env);
       await db.batch([
         db.prepare("DELETE FROM movements WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
@@ -263,8 +360,8 @@ async function route(request, env, parts) {
         throw new HttpError(409, `Not enough stock: only ${p.qty} available`);
       }
       await db.prepare(
-        "INSERT INTO movements (product_id, change, qty_after, reason, note) VALUES (?, ?, ?, ?, ?)")
-        .bind(id, change, updated.qty, clean(body.reason), clean(body.note)).run();
+        "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(id, change, updated.qty, clean(body.reason), clean(body.note), by).run();
       return json(await getProduct(db, id));
     }
     if (sub === "photo" && id !== null) {
@@ -306,10 +403,13 @@ async function route(request, env, parts) {
   // ---------- recent activity ----------
   if (resource === "movements" && method === "GET" && id === null) {
     const limit = Math.min(Math.max(int(url.searchParams.get("limit"), 50), 1), 500);
+    const who = clean(url.searchParams.get("user"));
     const { results } = await db.prepare(
       `SELECT m.*, p.code, p.name FROM movements m JOIN products p ON p.id = m.product_id
-       ORDER BY m.id DESC LIMIT ?`).bind(limit).all();
-    return json(results);
+       ${who ? "WHERE m.by_user = ?" : ""} ORDER BY m.id DESC LIMIT ?`).bind(...(who ? [who, limit] : [limit])).all();
+    const staff = await db.prepare(
+      "SELECT DISTINCT by_user FROM movements WHERE by_user IS NOT NULL ORDER BY by_user").all();
+    return json({ movements: results, staff: staff.results.map((r) => r.by_user) });
   }
 
   throw new HttpError(404, "Not found");
@@ -335,11 +435,16 @@ export async function onRequest({ request, env, params }) {
         cookie(request, "inv_pw") !== env.APP_PASSWORD) {
       throw new HttpError(401, "Wrong or missing password");
     }
+    let user = null;
+    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
+      const email = await verifyAccess(request, env);
+      user = { email, name: displayName(email, env) };
+    }
     await ensureSchema(env.DB);
     const parts = Array.isArray(params.path) ? params.path : params.path ? [params.path] : [];
-    return await route(request, env, parts);
+    return await route(request, env, parts, user);
   } catch (err) {
-    if (err instanceof HttpError) return json({ error: err.message }, err.status);
+    if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status);
     if (String(err && err.message).includes("UNIQUE")) return json({ error: "That already exists" }, 409);
     console.error(err);
     return json({ error: "Server error: " + (err && err.message) }, 500);

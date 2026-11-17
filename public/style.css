@@ -55,6 +55,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 .topbar h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+.me { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); margin-right: auto; margin-left: 12px; }
+.me b { color: var(--text); }
+.me .role { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.me a { color: var(--accent); }
+.banner { position: fixed; top: 0; left: 0; right: 0; z-index: 20; background: var(--out); color: #fff; padding: 12px 16px; text-align: center; }
+.banner button { margin-left: 10px; min-height: 32px; padding: 4px 12px; color: var(--text); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgb(0 0 0 / .2); vertical-align: -1px; margin-right: 3px; }
+.mv .by { color: var(--accent); font-weight: 600; }
 .top-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 main { max-width: 1100px; margin: 0 auto; padding: 16px; }
@@ -203,7 +211,9 @@ label > input, label > select, label > textarea, label > .row, label > .stepper 
 .toast.show { opacity: 1; transform: translateX(-50%); }
 
 @media (max-width: 560px) {
-  .topbar h1 { font-size: 16px; width: 100%; }
+  .topbar h1 { font-size: 16px; }
+  .me { margin-left: 0; width: 100%; order: 3; }
+  .top-actions { order: 4; }
   .top-actions { width: 100%; }
   .top-actions button { flex: 1; padding: 8px 8px; font-size: 14px; }
   .grid { grid-template-columns: 1fr; }
