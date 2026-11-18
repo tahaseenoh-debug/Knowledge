@@ -20,6 +20,9 @@
 //   PUT    /locations/:id               {name}         (owner)
 //   DELETE /locations/:id               (owner, only when empty)
 //   POST   /products/:id/move           {from_location_id, to_location_id, qty, note?}
+//   PUT    /products/:id/track          {on}   (track each piece separately)
+//   GET    /products/:id/pieces         (pieces of a tracked item)
+//   GET    /pieces/:serial              (one piece + its history, e.g. NEC-0001-03)
 //   GET    /photo-index                 (photo fingerprints for search by photo)
 //   PUT    /products/:id/photo-vec      {vec, v}  (fingerprint for the current photo)
 //   GET    /incidents?after=&status=open|all   (emergency reports + open_count)
@@ -98,6 +101,16 @@ const SCHEMA = [
     qty INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (product_id, location_id))`,
   `CREATE INDEX IF NOT EXISTS idx_product_locations_loc ON product_locations(location_id)`,
+  `CREATE TABLE IF NOT EXISTS pieces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    serial TEXT NOT NULL UNIQUE,
+    location_id INTEGER REFERENCES locations(id),
+    status TEXT NOT NULL DEFAULT 'in',
+    out_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE INDEX IF NOT EXISTS idx_pieces_product ON pieces(product_id, status)`,
   `CREATE TABLE IF NOT EXISTS photo_vectors (
     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
     photo_v TEXT NOT NULL,
@@ -112,6 +125,9 @@ const ADDED_COLUMNS = [
   ["movements", "location", "TEXT"],     // place the pieces went into / out of
   ["movements", "to_location", "TEXT"],  // for moves: where they went
   ["movements", "moved", "INTEGER"],     // for moves: how many pieces
+  ["movements", "pieces", "TEXT"],       // for tracked items: which pieces (serials, comma-separated)
+  ["products", "track_pieces", "INTEGER NOT NULL DEFAULT 0"],
+  ["products", "next_piece", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 let schemaReady = false;
@@ -276,6 +292,51 @@ function productRow(p) {
   return { ...rest, locations, unassigned: Math.max(0, p.qty - placed) };
 }
 
+// ---------- items tracked piece by piece ----------
+// Each piece has its own serial (NEC-0001-03) and place. The item's total and per-place
+// counts are worked out from its pieces, so the rest of the app keeps working unchanged.
+
+async function syncFromPieces(db, productId) {
+  await db.batch([
+    db.prepare("DELETE FROM product_locations WHERE product_id = ?").bind(productId),
+    db.prepare(`INSERT INTO product_locations (product_id, location_id, qty)
+      SELECT product_id, location_id, COUNT(*) FROM pieces
+      WHERE product_id = ? AND status = 'in' AND location_id IS NOT NULL GROUP BY location_id`).bind(productId),
+    db.prepare(`UPDATE products SET qty = (SELECT COUNT(*) FROM pieces WHERE product_id = ? AND status = 'in'),
+      updated_at = datetime('now') WHERE id = ?`).bind(productId, productId),
+  ]);
+}
+
+async function newPieces(db, p, n, locationId) {
+  if (n < 1) return [];
+  if (n > 500) throw new HttpError(400, "Add at most 500 pieces at a time");
+  const r = await db.prepare("UPDATE products SET next_piece = next_piece + ? WHERE id = ? RETURNING next_piece")
+    .bind(n, p.id).first();
+  const serials = [];
+  for (let k = r.next_piece - n + 1; k <= r.next_piece; k++) serials.push(`${p.code}-${String(k).padStart(2, "0")}`);
+  await db.batch(serials.map((s) => db.prepare(
+    "INSERT INTO pieces (product_id, serial, location_id) VALUES (?, ?, ?)").bind(p.id, s, locationId || null)));
+  return serials;
+}
+
+// The chosen pieces, all of which must be in stock for this item.
+async function inStockPieces(db, productId, serials) {
+  const want = [...new Set((Array.isArray(serials) ? serials : []).map((x) => String(x).trim().toUpperCase()).filter(Boolean))];
+  if (!want.length) throw new HttpError(400, "Choose which pieces");
+  if (want.length > 500) throw new HttpError(400, "Too many pieces at once");
+  const { results } = await db.prepare(
+    `SELECT pc.id, pc.serial, pc.location_id, l.name AS location FROM pieces pc LEFT JOIN locations l ON l.id = pc.location_id
+     WHERE pc.product_id = ? AND pc.status = 'in' AND pc.serial IN (${want.map(() => "?").join(",")})`)
+    .bind(productId, ...want).all();
+  if (results.length !== want.length) {
+    const found = new Set(results.map((r) => r.serial));
+    throw new HttpError(409, "Not in stock: " + want.filter((x) => !found.has(x)).join(", "));
+  }
+  return results;
+}
+
+const placeNames = (rows) => [...new Set(rows.map((r) => r.location || "Place not set"))].join(", ");
+
 async function getLocation(db, id) {
   if (!id) return null;
   const l = await db.prepare("SELECT id, name FROM locations WHERE id = ?").bind(id).first();
@@ -411,7 +472,7 @@ async function route(request, env, parts, user, waitUntil) {
   const url = new URL(request.url);
   const [resource, idStr, sub] = parts;
   const id = idStr !== undefined ? Number(idStr) : null;
-  if (idStr !== undefined && !Number.isInteger(id) && resource !== "notify") throw new HttpError(404, "Not found");
+  if (idStr !== undefined && !Number.isInteger(id) && resource !== "notify" && resource !== "pieces") throw new HttpError(404, "Not found");
 
   // ---------- auth check endpoint ----------
   if (resource === "ping") return json({ ok: true });
@@ -534,6 +595,19 @@ async function route(request, env, parts, user, waitUntil) {
     }
   }
 
+  // ---------- one piece ----------
+  if (resource === "pieces" && method === "GET" && idStr) {
+    const serial = String(idStr).toUpperCase();
+    const pc = await db.prepare(
+      `SELECT pc.serial, pc.status, pc.out_reason, pc.product_id, pc.location_id, l.name AS location, pc.created_at, pc.updated_at
+       FROM pieces pc LEFT JOIN locations l ON l.id = pc.location_id WHERE pc.serial = ?`).bind(serial).first();
+    if (!pc) throw new HttpError(404, `No piece ${serial}`);
+    const { results } = await db.prepare(
+      `SELECT * FROM movements WHERE product_id = ? AND (',' || pieces || ',') LIKE ? ORDER BY id DESC LIMIT 100`)
+      .bind(pc.product_id, `%,${serial},%`).all();
+    return json({ ...pc, history: results });
+  }
+
   // ---------- places (locations) ----------
   if (resource === "locations") {
     if (method === "GET" && id === null) {
@@ -569,6 +643,7 @@ async function route(request, env, parts, user, waitUntil) {
       if (used.n > 0) throw new HttpError(409, `${used.n} piece(s) are still there. Move them first.`);
       await db.batch([
         db.prepare("DELETE FROM product_locations WHERE location_id = ?").bind(id),
+        db.prepare("UPDATE pieces SET location_id = NULL WHERE location_id = ?").bind(id),
         db.prepare("DELETE FROM locations WHERE id = ?").bind(id),
       ]);
       return json({ ok: true });
@@ -680,6 +755,7 @@ async function route(request, env, parts, user, waitUntil) {
         db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM photo_vectors WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM product_locations WHERE product_id = ?").bind(id),
+        db.prepare("DELETE FROM pieces WHERE product_id = ?").bind(id),
         db.prepare("UPDATE incidents SET product_id = NULL WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM products WHERE id = ?").bind(id),
       ]);
@@ -691,6 +767,28 @@ async function route(request, env, parts, user, waitUntil) {
       if (!change) throw new HttpError(400, "Quantity must be a non-zero whole number");
       const before = await getProduct(db, id); // 404 if missing
       const place = await getLocation(db, int(body.location_id));
+      if (before.track_pieces) {
+        let serials, rows = [];
+        if (change > 0) {
+          serials = await newPieces(db, before, change, place && place.id);
+        } else {
+          rows = await inStockPieces(db, id, body.pieces);
+          if (rows.length !== -change) throw new HttpError(400, `Choose exactly ${-change} piece(s)`);
+          serials = rows.map((r) => r.serial);
+          await db.prepare(
+            `UPDATE pieces SET status = 'out', out_reason = ?, updated_at = datetime('now')
+             WHERE id IN (${rows.map(() => "?").join(",")})`).bind(clean(body.reason), ...rows.map((r) => r.id)).run();
+        }
+        await syncFromPieces(db, id);
+        const product = await getProduct(db, id);
+        await db.prepare(
+          "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, pieces) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          .bind(id, change, product.qty, clean(body.reason), clean(body.note), by,
+            change > 0 ? (place && place.name) : placeNames(rows), serials.join(",")).run();
+        const msg = telegramReady(env) && lowStockMessage(product, before.qty, change, clean(body.reason), by, url.origin);
+        if (msg) waitUntil(sendTelegram(env, msg).catch((e) => console.error("Low-stock alert failed:", e.message)));
+        return json({ ...product, new_pieces: change > 0 ? serials : [] });
+      }
       let updated;
       if (change > 0) {
         updated = await db.prepare(
@@ -729,6 +827,23 @@ async function route(request, env, parts, user, waitUntil) {
     }
     if (method === "POST" && id !== null && sub === "move") {
       const body = await readBody(request);
+      const tp = await getProduct(db, id);
+      if (tp.track_pieces) {
+        const to = await getLocation(db, int(body.to_location_id));
+        const rows = (await inStockPieces(db, id, body.pieces))
+          .filter((r) => (r.location_id || null) !== (to ? to.id : null)); // skip pieces already there
+        if (!rows.length) return json({ ...tp, moved: 0 });
+        await db.prepare(
+          `UPDATE pieces SET location_id = ?, updated_at = datetime('now') WHERE id IN (${rows.map(() => "?").join(",")})`)
+          .bind(to ? to.id : null, ...rows.map((r) => r.id)).run();
+        await syncFromPieces(db, id);
+        await db.prepare(
+          `INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, to_location, moved, pieces)
+           VALUES (?, 0, ?, 'Moved', ?, ?, ?, ?, ?, ?)`)
+          .bind(id, tp.qty, clean(body.note), by, placeNames(rows), to ? to.name : "Place not set", rows.length,
+            rows.map((r) => r.serial).join(",")).run();
+        return json({ ...(await getProduct(db, id)), moved: rows.length });
+      }
       const n = int(body.qty);
       if (!n || n < 1) throw new HttpError(400, "Quantity must be 1 or more");
       const p = await getProduct(db, id);
@@ -784,6 +899,30 @@ async function route(request, env, parts, user, waitUntil) {
         ]);
         return json(await getProduct(db, id));
       }
+    }
+    if (method === "PUT" && id !== null && sub === "track") {
+      const on = !!(await readBody(request)).on;
+      const p = await getProduct(db, id);
+      if (on && !p.track_pieces) {
+        // Give every piece in stock its own serial, keeping the places they're in now.
+        for (const l of p.locations) await newPieces(db, p, l.qty, l.id);
+        await newPieces(db, p, p.unassigned, null);
+        await db.prepare("UPDATE products SET track_pieces = 1 WHERE id = ?").bind(id).run();
+        await syncFromPieces(db, id);
+      } else if (!on && p.track_pieces) {
+        await db.batch([
+          db.prepare("UPDATE pieces SET status = 'untracked', updated_at = datetime('now') WHERE product_id = ? AND status = 'in'").bind(id),
+          db.prepare("UPDATE products SET track_pieces = 0 WHERE id = ?").bind(id),
+        ]);
+      }
+      return json(await getProduct(db, id));
+    }
+    if (method === "GET" && id !== null && sub === "pieces") {
+      const { results } = await db.prepare(
+        `SELECT pc.serial, pc.status, pc.out_reason, pc.location_id, l.name AS location, pc.created_at, pc.updated_at
+         FROM pieces pc LEFT JOIN locations l ON l.id = pc.location_id
+         WHERE pc.product_id = ? AND pc.status IN ('in', 'out') ORDER BY pc.status, pc.id LIMIT 2000`).bind(id).all();
+      return json(results);
     }
     if (method === "PUT" && id !== null && sub === "photo-vec") {
       const body = await readBody(request);

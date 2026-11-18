@@ -22,6 +22,13 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
   - **📷 Scan** uses the phone camera: scan a place label to see what should be there, or an item tag to see where its pieces are.
   - The labels also work with the phone's **normal camera app**, which opens the app straight on that place or item.
   - No label? Type the item code in the scan window instead.
+- **🏷 Track each piece separately** (optional, per item, for bigger or valuable pieces):
+  - Tick it in the item's **Edit** form. Every piece then gets its own number and QR tag (e.g. `NEC-0001-03`), keeping the place it's in now.
+  - **Piece moved?** Scan its tag, tap **"Moved? Scan the new place"**, then scan the label of where it is now. That's two scans, recorded with who did it.
+  - **Loading a tray or the safe:** open the place, tap **📷 Scan pieces in**, and scan each piece's tag as you put it there.
+  - **Selling:** tick exactly which piece was sold, so you always know which pieces are left and where.
+  - Each piece has its own history: every move and sale.
+  - Tiny items can stay as they are (counted per tray, no tag on the piece).
 - **Low-stock notifications**:
   - a 🔔 bell with a red count of items that are low or sold out; tap it to see the list and restock with one tap
   - a warning pop-up the moment a sale makes an item low ("⚠️ RIN-0001 is now low: only 1 left")

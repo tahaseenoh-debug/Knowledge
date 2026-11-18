@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS products (
   notes       TEXT,
   created_by  TEXT,
   qty         INTEGER NOT NULL DEFAULT 0,
+  track_pieces INTEGER NOT NULL DEFAULT 0,  -- 1 = every piece has its own serial and QR tag
+  next_piece  INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS movements (
   location   TEXT,              -- place the pieces went into / out of
   to_location TEXT,             -- for moves: where they went
   moved      INTEGER,           -- for moves: how many pieces
+  pieces     TEXT,              -- for items tracked piece by piece: which ones (serials)
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -109,3 +112,17 @@ CREATE TABLE IF NOT EXISTS product_locations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_locations_loc ON product_locations(location_id);
+
+-- Pieces of items tracked piece by piece (bigger / valuable pieces), each with its own QR tag.
+CREATE TABLE IF NOT EXISTS pieces (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  serial      TEXT NOT NULL UNIQUE,              -- e.g. NEC-0001-03
+  location_id INTEGER REFERENCES locations(id),  -- NULL = place not set
+  status      TEXT NOT NULL DEFAULT 'in',        -- in | out (sold etc.) | untracked
+  out_reason  TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pieces_product ON pieces(product_id, status);

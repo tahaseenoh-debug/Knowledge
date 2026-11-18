@@ -110,9 +110,52 @@
       </div>
       <div class="actions">
         <button type="button" class="ghost" id="btn-place-label">🖨 Label</button>
+        <button type="button" class="ghost" id="btn-scan-in">📷 Scan pieces in</button>
         <span class="spacer"></span>
         <button type="button" class="ghost" data-close>Close</button>
       </div>
+    </div>
+  </dialog>
+
+  <!-- Pieces of an item tracked piece by piece -->
+  <dialog id="dlg-pieces">
+    <div class="dlg-body">
+      <h2 id="pieces-title">🏷 Pieces</h2>
+      <p class="muted" id="pieces-sub"></p>
+      <div id="pieces-list" class="piece-picks big"></div>
+      <div class="row wrap">
+        <button type="button" class="ghost" id="btn-pieces-all">Select all</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" id="btn-pieces-move">⇄ Move</button>
+        <button type="button" class="ghost" id="btn-pieces-print">🖨 Print tags</button>
+      </div>
+      <details id="pieces-out-wrap"><summary id="pieces-out-sum"></summary><div id="pieces-out" class="pieces-out"></div></details>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- One piece (opened by scanning its tag) -->
+  <dialog id="dlg-piece">
+    <div class="dlg-body">
+      <div class="piece-head">
+        <div class="th" id="piece-photo"></div>
+        <div><div class="piece-serial" id="piece-serial"></div><div id="piece-name"></div><div class="muted" id="piece-status"></div></div>
+      </div>
+      <div class="piece-where" id="piece-where"></div>
+      <div id="piece-actions">
+        <button type="button" class="primary big-btn" id="btn-piece-scan-place">📷 Moved? Scan the new place</button>
+        <div class="row">
+          <select id="piece-to" aria-label="Move to"></select>
+          <button type="button" class="ghost" id="btn-piece-move">Move</button>
+        </div>
+        <div class="row wrap">
+          <button type="button" class="ghost" id="btn-piece-out">− Sold / taken out</button>
+          <button type="button" class="ghost" id="btn-piece-tag">🖨 Print tag</button>
+        </div>
+      </div>
+      <h3 class="small-h">History of this piece</h3>
+      <div id="piece-history" class="history"></div>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
     </div>
   </dialog>
 
@@ -121,9 +164,10 @@
     <form id="form-move" method="dialog">
       <h2 id="move-title">⇄ Move</h2>
       <p class="muted" id="move-sub"></p>
-      <label>From<select name="from" id="move-from"></select></label>
+      <label id="move-from-wrap">From<select name="from" id="move-from"></select></label>
       <label>To<select name="to" id="move-to"></select></label>
-      <label>How many
+      <div id="move-pieces" class="piece-picks" hidden></div>
+      <label id="move-qty-wrap">How many
         <div class="stepper">
           <button type="button" data-step="-1" aria-label="Less">−</button>
           <input name="qty" type="number" min="1" step="1" value="1" inputmode="numeric" required>
@@ -143,12 +187,13 @@
   <!-- QR scanner -->
   <dialog id="dlg-scan" class="scan-dlg">
     <div class="dlg-body">
-      <h2>📷 Scan a QR label</h2>
+      <h2 id="scan-title">📷 Scan a QR label</h2>
       <div class="scan-view">
         <video id="scan-video" playsinline muted></video>
         <div class="scan-frame" aria-hidden="true"></div>
       </div>
       <p class="muted" id="scan-status" role="status">Starting camera…</p>
+      <ul class="scan-log" id="scan-log"></ul>
       <form id="form-code" class="row">
         <input name="code" placeholder="Or type an item code, e.g. RIN-0001" autocomplete="off" autocapitalize="characters">
         <button type="submit" class="ghost">Find</button>
@@ -164,7 +209,8 @@
       <p class="muted">Print on sticker paper (or plain paper and tape). Scan them with the 📷 Scan button, or with any phone camera.</p>
       <fieldset class="label-kind">
         <label class="check"><input type="radio" name="kind" value="places" checked> Place labels (big, for trays, drawers, the safe…)</label>
-        <label class="check"><input type="radio" name="kind" value="items"> Item tags (small, for pieces or boxes)</label>
+        <label class="check"><input type="radio" name="kind" value="items"> Item tags (small, one per design: for trays, bags or boxes)</label>
+        <label class="check"><input type="radio" name="kind" value="pieces"> Piece tags (one per piece, for items tracked piece by piece)</label>
       </fieldset>
       <label id="labels-which-wrap" hidden>Which items
         <select name="which" id="labels-which"></select>
@@ -272,6 +318,8 @@
         <label>Low-stock alert at<input name="low_stock" type="number" step="1" min="0" value="1" inputmode="numeric"></label>
         <label id="opening-wrap">Opening stock<input name="qty" type="number" step="1" min="0" value="0" inputmode="numeric"></label>
         <label id="opening-place-wrap">Put it in<select name="location_id" id="item-place"></select></label>
+        <label class="check full track-opt"><input type="checkbox" name="track_pieces" id="item-track">
+          <span><b>Track each piece separately</b><br>Every piece gets its own number and QR tag (e.g. NEC-0001-03), so you know where each one is. Best for bigger or valuable pieces.</span></label>
         <label class="full">Notes<textarea name="notes" rows="2"></textarea></label>
       </div>
       <p class="error" id="item-error" hidden></p>
@@ -293,13 +341,14 @@
         <label><input type="radio" name="dir" value="in"> <span>＋ Stock in</span></label>
         <label><input type="radio" name="dir" value="out"> <span>－ Stock out</span></label>
       </div>
-      <label>Quantity
+      <label id="stock-qty-wrap">Quantity
         <div class="stepper">
           <button type="button" data-step="-1" aria-label="Less">−</button>
           <input name="amount" type="number" min="1" step="1" value="1" inputmode="numeric" required>
           <button type="button" data-step="1" aria-label="More">+</button>
         </div>
       </label>
+      <div id="stock-pieces" class="piece-picks" hidden></div>
       <label id="stock-place-wrap"><span id="stock-place-label">Place</span><select name="location_id" id="stock-place"></select></label>
       <label>Reason<select name="reason" id="stock-reason"></select></label>
       <label>Note<input name="note" placeholder="Customer name, invoice no., etc. (optional)"></label>

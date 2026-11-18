@@ -190,7 +190,8 @@ function itemHtml(p) {
     p.sell_price != null ? "Price " + fmtNum(p.sell_price) : "",
   ].filter(Boolean).map((x) => x.startsWith("COLOUR:") ? colourHtml(x.slice(7)) : esc(x)).join(" · ");
   const cls = p.qty === 0 ? "zero" : p.qty <= p.low_stock ? "low" : "";
-  const badge = p.qty === 0 ? '<span class="badge out">Out of stock</span>' : p.qty <= p.low_stock ? '<span class="badge">Low stock</span>' : "";
+  const badge = (p.qty === 0 ? '<span class="badge out">Out of stock</span>' : p.qty <= p.low_stock ? '<span class="badge">Low stock</span>' : "") +
+    (p.track_pieces ? '<span class="badge track">🏷 Each piece tracked</span>' : "");
   const thumb = p.photo_v
     ? `<button class="thumb" data-act="photo" aria-label="View photo"><img src="${photoUrl(p)}" alt="" loading="lazy"></button>`
     : `<div class="thumb" aria-hidden="true">💍</div>`;
@@ -204,7 +205,7 @@ function itemHtml(p) {
         <button class="linkbtn" data-act="edit">Edit</button>
         <button class="linkbtn" data-act="history">History</button>
         ${p.qty > 0 && state.locations.length ? '<button class="linkbtn" data-act="move">Move</button>' : ""}
-        <button class="linkbtn" data-act="label">QR tag</button>
+        ${p.track_pieces ? '<button class="linkbtn" data-act="pieces">Pieces</button>' : '<button class="linkbtn" data-act="label">QR tag</button>'}
       </div>
     </div>
     <div class="qty">
@@ -285,6 +286,7 @@ function openItem(product = null) {
   $("#btn-delete-item").hidden = !product || !state.me.owner;
   $("#opening-wrap").hidden = !!product;
   $("#opening-place-wrap").hidden = !!product || !state.locations.length;
+  $("#item-track").checked = !!(product && product.track_pieces);
   if (!product) fillPlaceSelect($("#item-place"), { mode: "in", selected: lastPlace() });
   renderCategorySelect(product ? product.category_id : state.activeCat || "");
   state.photo = null;
@@ -330,12 +332,26 @@ async function saveItem(e) {
     } else if (state.photo) {
       await api(`products/${p.id}/photo`, { method: "PUT", body: { data: state.photo.dataUrl } });
     }
+    const wantTrack = $("#item-track").checked;
+    let newPieces = [];
+    if (wantTrack !== !!p.track_pieces) {
+      if (!wantTrack && !confirm(`Stop tracking ${p.code} piece by piece? The individual piece numbers won't be used any more (the counts stay).`)) {
+        $("#item-track").checked = true;
+      } else {
+        const t = await api(`products/${p.id}/track`, { method: "PUT", body: { on: wantTrack } });
+        if (wantTrack) newPieces = (await api(`products/${p.id}/pieces`)).filter((x) => x.status === "in").map((x) => x.serial);
+        p = t;
+      }
+    }
     const photoChanged = !!state.photo;
     state.photo = null;
     toast(body._isNew ? `Added ${p.code}` : `Saved ${p.code}`);
     $("#dlg-item").close();
     await refresh();
     if (photoChanged) indexSoon();
+    if (newPieces.length && confirm(`${p.code} now has ${newPieces.length} numbered piece(s): ${newPieces.slice(0, 6).join(", ")}${newPieces.length > 6 ? "…" : ""}\n\nPrint their QR tags now?`)) {
+      printLabels("pieces", newPieces.map((serial) => ({ serial, p })));
+    }
   } catch (err) { showError($("#item-error"), err); }
   finally { btn.disabled = false; }
 }
@@ -417,12 +433,36 @@ function setStockDir(dir) {
   $("#stock-place-label").textContent = dir === "in" ? "Put it in" : "Taken from";
   const pref = state.stockPlace != null ? state.stockPlace : dir === "in" ? (biggestPlace(p) ?? lastPlace()) : biggestPlace(p);
   fillPlaceSelect($("#stock-place"), { mode: dir, product: p, selected: pref });
+  renderStockPieces();
 }
 
+// For items tracked piece by piece, stock out means ticking exactly which pieces.
+function renderStockPieces() {
+  const p = state.stockItem, form = $("#form-stock");
+  const picking = !!(p && p.track_pieces && form.dir.value === "out");
+  $("#stock-qty-wrap").hidden = picking;
+  $("#stock-pieces").hidden = !picking;
+  if (!picking) { $("#stock-pieces").innerHTML = ""; return; }
+  const place = $("#stock-place").value;
+  const list = (state.stockPieces || []).filter((x) => x.status === "in" && String(x.location_id ?? "") === place);
+  $("#stock-pieces").innerHTML = '<p class="hint">Tick the piece(s) taken out:</p>' + (list.map((x) => `
+    <label class="pp"><input type="checkbox" value="${esc(x.serial)}" ${(state.stockPick || []).includes(x.serial) ? "checked" : ""}>
+      <span class="sr">${esc(x.serial)}</span><span class="where">📍 ${esc(x.location || "Place not set")}</span></label>`).join("")
+    || '<p class="hint">No pieces here.</p>');
+}
+
+const pickedSerials = (box) => [...box.querySelectorAll("input[type=checkbox]:checked")].map((c) => c.value);
+
 // placeId: the place the dialog was opened from (if any), so it's pre-selected.
-function openStock(product, dir, placeId = null) {
+// pick: piece serials to pre-tick (items tracked piece by piece).
+async function openStock(product, dir, placeId = null, pick = []) {
   state.stockItem = product;
   state.stockPlace = placeId;
+  state.stockPick = pick;
+  state.stockPieces = [];
+  if (product.track_pieces) {
+    try { state.stockPieces = await api(`products/${product.id}/pieces`); } catch (err) { return toast(err.message, 4000); }
+  }
   const form = $("#form-stock");
   form.reset();
   $("#stock-error").hidden = true;
@@ -436,16 +476,19 @@ function openStock(product, dir, placeId = null) {
 async function saveStock(e) {
   e.preventDefault();
   const form = e.target;
-  const amount = parseInt(form.amount.value, 10);
   const err = $("#stock-error");
-  if (!(amount > 0)) return showError(err, new Error("Enter a quantity of 1 or more"));
   const dir = form.dir.value;
+  const tracked = state.stockItem.track_pieces && dir === "out";
+  const pieces = tracked ? pickedSerials($("#stock-pieces")) : undefined;
+  const amount = tracked ? pieces.length : parseInt(form.amount.value, 10);
+  if (tracked && !amount) return showError(err, new Error("Tick the piece(s) taken out"));
+  if (!(amount > 0)) return showError(err, new Error("Enter a quantity of 1 or more"));
   const change = dir === "out" ? -amount : amount;
   const btn = form.querySelector("[type=submit]");
   btn.disabled = true;
   try {
     const p = await api(`products/${state.stockItem.id}/stock`, {
-      method: "POST", body: { change, reason: form.reason.value, note: form.note.value, location_id: form.location_id.value },
+      method: "POST", body: { change, reason: form.reason.value, note: form.note.value, location_id: form.location_id.value, pieces },
     });
     if (dir === "in") rememberPlace(form.location_id.value);
     $("#dlg-stock").close();
@@ -454,6 +497,10 @@ async function saveStock(e) {
     else if (change < 0 && p.qty <= p.low_stock && old > p.low_stock) toast(`⚠️ ${p.code} ${p.name} is now low: only ${p.qty} left`, 5000);
     else toast(`${p.code}: ${change > 0 ? "+" : ""}${change} → ${p.qty} in stock`);
     await refresh();
+    if (p.new_pieces && p.new_pieces.length &&
+        confirm(`New pieces: ${p.new_pieces.join(", ")}\n\nPrint their QR tags now?`)) {
+      printLabels("pieces", p.new_pieces.map((serial) => ({ serial, p })));
+    }
   } catch (e2) { showError(err, e2); }
   finally { btn.disabled = false; }
 }
@@ -465,7 +512,8 @@ function movementHtml(m, withItem) {
   const title = withItem ? `<b>${esc(m.code)}</b> ${esc(m.name)}` : esc(m.reason || (dir === "in" ? "Stock in" : "Stock out"));
   const where = isMove ? `📍 ${m.location} → ${m.to_location}` : m.location ? `📍 ${m.location}` : null;
   const sub = [m.by_user ? `<span class="by">by ${esc(m.by_user)}</span>` : "",
-    ...[withItem ? m.reason : null, where, m.note, isMove ? null : `Balance ${m.qty_after}`].filter(Boolean).map(esc)].filter(Boolean).join(" · ");
+    ...[withItem ? m.reason : null, where, m.pieces ? "🏷 " + m.pieces.split(",").join(", ") : null, m.note,
+      isMove ? null : `Balance ${m.qty_after}`].filter(Boolean).map(esc)].filter(Boolean).join(" · ");
   const badge = isMove ? `⇄${m.moved}` : `${m.change > 0 ? "+" : ""}${m.change}`;
   return `<div class="mv"><span class="chg ${dir}">${badge}</span>
     <span class="what">${title}<small>${sub}</small></span><span class="when">${fmtDate(m.created_at)}</span></div>`;
@@ -596,9 +644,9 @@ async function onPlaceSelectChange(e) {
   try {
     const loc = await api("locations", { method: "POST", body: { name } });
     await loadLocations();
-    const mode = sel.id === "move-to" ? "to" : "in";
+    const mode = sel.id === "move-to" && !(state.move && state.move.product.track_pieces) ? "to" : "in";
     fillPlaceSelect(sel, { mode, product: state.move && state.move.product, selected: loc.id,
-      exclude: sel.id === "move-to" ? $("#move-from").value : undefined });
+      exclude: mode === "to" ? $("#move-from").value : undefined });
     toast(`Place "${loc.name}" saved`);
   } catch (err) { toast(err.message, 4000); sel.value = sel.dataset.prev || ""; }
 }
@@ -722,8 +770,25 @@ function putHere() {
 }
 
 // ----- move -----
-function openMove(product, fromId = null, toId = null) {
-  state.move = { product };
+// pick: piece serials to pre-tick (items tracked piece by piece).
+async function openMove(product, fromId = null, toId = null, pick = []) {
+  state.move = { product, pieces: [] };
+  if (product.track_pieces) {
+    try { state.move.pieces = (await api(`products/${product.id}/pieces`)).filter((x) => x.status === "in"); }
+    catch (err) { return toast(err.message, 4000); }
+  }
+  const tracked = !!product.track_pieces;
+  $("#move-from-wrap").hidden = tracked;
+  $("#move-qty-wrap").hidden = tracked;
+  $("#move-pieces").hidden = !tracked;
+  if (tracked) {
+    // Pieces at the place it was opened from come first.
+    const list = [...state.move.pieces].sort((a, b) =>
+      (String(b.location_id ?? "") === String(fromId ?? "x")) - (String(a.location_id ?? "") === String(fromId ?? "x")) || a.serial.localeCompare(b.serial));
+    $("#move-pieces").innerHTML = '<p class="hint">Tick the piece(s) to move:</p>' + list.map((x) => `
+      <label class="pp"><input type="checkbox" value="${esc(x.serial)}" ${pick.includes(x.serial) ? "checked" : ""}>
+        <span class="sr">${esc(x.serial)}</span><span class="where">📍 ${esc(x.location || "Place not set")}</span></label>`).join("");
+  } else $("#move-pieces").innerHTML = "";
   const form = $("#form-move");
   form.reset();
   $("#move-error").hidden = true;
@@ -735,10 +800,12 @@ function openMove(product, fromId = null, toId = null) {
   }
   fillPlaceSelect($("#move-from"), { mode: "out", product, selected: from });
   fillMoveTo(toId);
+  if (tracked) fillPlaceSelect($("#move-to"), { mode: "in", selected: toId ?? "" });
   $("#dlg-move").showModal();
 }
 
 function fillMoveTo(selected) {
+  if (state.move.product.track_pieces) return;
   const from = $("#move-from").value;
   fillPlaceSelect($("#move-to"), { mode: "to", product: state.move.product, exclude: from,
     selected: selected != null ? selected : $("#move-to").value });
@@ -755,6 +822,16 @@ async function saveMove(e) {
   if (form.to.value === "__new") return showError(err, new Error("Choose where to move it"));
   btn.disabled = true;
   try {
+    if (state.move.product.track_pieces) {
+      const pieces = pickedSerials($("#move-pieces"));
+      if (!pieces.length) throw new Error("Tick the piece(s) to move");
+      const p = await api(`products/${state.move.product.id}/move`, { method: "POST", body: {
+        to_location_id: form.to.value, pieces, note: form.note.value } });
+      $("#dlg-move").close();
+      toast(p.moved ? `Moved ${pieces.join(", ")} → ${placeName(form.to.value)}` : "Already there", 3500);
+      await refresh();
+      return;
+    }
     const p = await api(`products/${state.move.product.id}/move`, { method: "POST", body: {
       from_location_id: form.from.value, to_location_id: form.to.value, qty: form.qty.value, note: form.note.value,
     } });
@@ -765,9 +842,60 @@ async function saveMove(e) {
   finally { btn.disabled = false; }
 }
 
+// ----- items tracked piece by piece -----
+async function openPieces(p) {
+  state.piecesOf = p;
+  $("#pieces-title").textContent = `🏷 ${p.code} · ${p.name}`;
+  $("#pieces-list").innerHTML = '<p class="hint">Loading…</p>';
+  if (!$("#dlg-pieces").open) $("#dlg-pieces").showModal();
+  try {
+    const all = await api(`products/${p.id}/pieces`);
+    const inStock = all.filter((x) => x.status === "in"), out = all.filter((x) => x.status === "out");
+    $("#pieces-sub").textContent = `${inStock.length} piece${inStock.length === 1 ? "" : "s"} in stock. Tick pieces to move them or print their tags.`;
+    $("#pieces-list").innerHTML = inStock.map((x) => `
+      <label class="pp"><input type="checkbox" value="${esc(x.serial)}"><span class="sr">${esc(x.serial)}</span>
+        <span class="where">📍 ${esc(x.location || "Place not set")}</span>
+        <button type="button" class="ghost open" data-serial="${esc(x.serial)}">Open</button></label>`).join("")
+      || '<p class="hint">No pieces in stock.</p>';
+    $("#pieces-out-wrap").hidden = !out.length;
+    $("#pieces-out-sum").textContent = `Sold / taken out (${out.length})`;
+    $("#pieces-out").innerHTML = out.map((x) =>
+      `<div>${esc(x.serial)} · ${esc(x.out_reason || "Out")} · ${esc(fmtDate(x.updated_at))}</div>`).join("");
+  } catch (err) { $("#pieces-list").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+}
+
+async function openPiece(serial) {
+  let pc;
+  try { pc = await api("pieces/" + encodeURIComponent(serial)); } catch (err) { return toast(err.message, 4000); }
+  const p = state.products.find((x) => x.id === pc.product_id);
+  if (!p) return toast("Item not found. Reload the page.", 4000);
+  state.piece = { ...pc, p };
+  $("#piece-photo").innerHTML = p.photo_v ? `<img src="${photoUrl(p)}" alt="">` : "💍";
+  $("#piece-serial").textContent = pc.serial;
+  $("#piece-name").textContent = `${p.name} · ${p.category}`;
+  const inStock = pc.status === "in";
+  $("#piece-status").textContent = inStock ? `In stock · ${p.qty} piece${p.qty === 1 ? "" : "s"} of this design` : "";
+  const where = $("#piece-where");
+  where.className = "piece-where" + (inStock ? "" : " out");
+  where.textContent = inStock ? `📍 ${pc.location || "Place not set"}`
+    : pc.status === "out" ? `Taken out: ${pc.out_reason || "out of stock"} (${fmtDate(pc.updated_at)})` : "No longer tracked";
+  $("#piece-actions").hidden = !inStock;
+  if (inStock) fillPlaceSelect($("#piece-to"), { mode: "to", exclude: pc.location_id ?? "", selected: null });
+  $("#piece-history").innerHTML = pc.history.map((m) => movementHtml(m, false)).join("") || '<p class="muted">No history yet.</p>';
+  if (!$("#dlg-piece").open) $("#dlg-piece").showModal();
+}
+
+async function movePiece(serial, productId, toId) {
+  const p = await api(`products/${productId}/move`, { method: "POST", body: { to_location_id: toId, pieces: [serial] } });
+  toast(p.moved ? `🏷 ${serial} → 📍 ${placeName(toId)}` : `${serial} is already at ${placeName(toId)}`, 3500);
+  await refresh();
+  return p.moved;
+}
+
 // ----- QR codes -----
 const itemLink = (p) => `${location.origin}/#item=${encodeURIComponent(p.code)}`;
 const placeLink = (l) => `${location.origin}/#place=${l.id}`;
+const pieceLink = (serial) => `${location.origin}/#piece=${encodeURIComponent(serial)}`;
 
 let qrLibPromise = null;
 const loadQrLib = () => qrLibPromise || (qrLibPromise = loadScript("/vendor/qrcode.js").catch((e) => { qrLibPromise = null; throw e; }));
@@ -779,11 +907,13 @@ function qrSvg(text) {
   return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
 }
 
-// kind "places": list of places; kind "items": list of products
+// kind "places": list of places; "items": list of products; "pieces": list of {serial, p}
 async function printLabels(kind, list) {
   if (!list.length) return toast("Nothing to print", 3000);
   try { await loadQrLib(); } catch (err) { return toast(err.message, 4000); }
-  const html = list.map((x) => kind === "places"
+  const html = list.map((x) => kind === "pieces"
+    ? `<div class="lbl piece">${qrSvg(pieceLink(x.serial))}<div class="t"><span class="c">${esc(x.serial)}</span><span class="n">${esc(x.p.name)}</span></div></div>`
+    : kind === "places"
     ? `<div class="lbl place">${qrSvg(placeLink(x))}<div class="t">${esc(x.name)}<small>📍 Scan to see what should be here</small></div></div>`
     : `<div class="lbl tag">${qrSvg(itemLink(x))}<div class="t"><span class="c">${esc(x.code)}</span><span class="n">${esc(x.name)}</span><span class="k">${esc([x.category, [x.metal, x.purity].filter(Boolean).join(" "), x.weight_g != null ? fmtNum(x.weight_g, 3) + " g" : ""].filter(Boolean).join(" · "))}</span></div></div>`
   ).join("");
@@ -793,18 +923,19 @@ async function printLabels(kind, list) {
 }
 
 function openLabels() {
-  const sel = $("#labels-which");
-  sel.innerHTML = [["all", `All items (${state.products.length})`],
-    ...state.categories.map((c) => ["cat:" + c.id, `Category: ${c.name} (${c.items})`]),
-    ...state.locations.map((l) => ["place:" + l.id, `Place: ${l.name} (${l.items})`])]
-    .map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
   updateLabelsForm();
   $("#dlg-labels").showModal();
 }
 
+const trackedProducts = () => state.products.filter((p) => p.track_pieces).sort((a, b) => a.code.localeCompare(b.code));
+
 function labelsSelection() {
   const form = $("#form-labels");
   if (form.kind.value === "places") return state.locations;
+  if (form.kind.value === "pieces") {
+    const w = form.which.value;
+    return trackedProducts().filter((p) => w === "all" || w === "item:" + p.id);
+  }
   const w = form.which.value;
   return state.products.filter((p) => w === "all" ? true
     : w.startsWith("cat:") ? p.category_id === Number(w.slice(4))
@@ -812,9 +943,26 @@ function labelsSelection() {
     .sort((a, b) => a.code.localeCompare(b.code));
 }
 
-function updateLabelsForm() {
+function updateLabelsForm(e) {
   const form = $("#form-labels");
-  $("#labels-which-wrap").hidden = form.kind.value !== "items";
+  const kind = form.kind.value;
+  if (!e || e.target.name === "kind") {
+    const sel = $("#labels-which");
+    const opts = kind === "pieces"
+      ? [["all", `All tracked items (${trackedProducts().length})`], ...trackedProducts().map((p) => ["item:" + p.id, `${p.code} · ${p.name} (${p.qty} pieces)`])]
+      : [["all", `All items (${state.products.length})`],
+        ...state.categories.map((c) => ["cat:" + c.id, `Category: ${c.name} (${c.items})`]),
+        ...state.locations.map((l) => ["place:" + l.id, `Place: ${l.name} (${l.items})`])];
+    sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+  }
+  $("#labels-which-wrap").hidden = kind === "places";
+  if (kind === "pieces") {
+    const n = labelsSelection().reduce((t, p) => t + p.qty, 0);
+    $("#labels-count").textContent = trackedProducts().length
+      ? `${n} piece tag${n === 1 ? "" : "s"} (3 × 2 cm QR, about 48 per A4 page).`
+      : "No items are tracked piece by piece yet. Turn it on in an item's Edit form.";
+    return;
+  }
   const n = labelsSelection().length;
   $("#labels-count").textContent = form.kind.value === "places"
     ? (n ? `${n} place label${n === 1 ? "" : "s"} (about 8 per A4 page).` : "No places yet. Add them under 📍 Places first.")
@@ -824,7 +972,16 @@ function updateLabelsForm() {
 // ----- scanner -----
 let scanStream = null, scanTimer = null, jsqrPromise = null;
 
-async function openScan() {
+// mode: null (open whatever is scanned), {type: "pickPlace", onPlace(id)}, or {type: "collect", placeId}
+async function openScan(mode = null) {
+  state.scanMode = mode;
+  state.scanBusy = false;
+  state.scanSeen = {};
+  $("#scan-log").innerHTML = "";
+  $("#scan-title").textContent = !mode ? "📷 Scan a QR label"
+    : mode.type === "pickPlace" ? "📷 Scan the new place's label"
+    : `📷 Scan pieces into ${placeName(mode.placeId)}`;
+  $("#form-code").hidden = !!mode;
   $("#scan-status").textContent = "Starting camera…";
   $(".scan-view").classList.remove("found");
   $("#form-code").reset();
@@ -840,7 +997,9 @@ async function openScan() {
     const video = $("#scan-video");
     video.srcObject = scanStream;
     await video.play();
-    $("#scan-status").textContent = "Point the camera at a QR label.";
+    $("#scan-status").textContent = !state.scanMode ? "Point the camera at a QR label."
+      : state.scanMode.type === "pickPlace" ? "Point the camera at the label on the tray, case, safe… where the piece is now."
+      : "Scan each piece's tag as you put it here. Tap Close when done.";
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     scanTimer = setInterval(() => {
@@ -867,9 +1026,36 @@ function stopScan() {
   scanStream = null;
 }
 
-function onScanned(text) {
+async function onScanned(text) {
   const target = parseTarget(text);
   if (!target) { $("#scan-status").textContent = "That QR code isn't one of this app's labels."; return; }
+  const mode = state.scanMode;
+  if (mode && mode.type === "pickPlace") {
+    if (target.type !== "place") { $("#scan-status").textContent = "That's not a place label. Scan the label on the tray, case or safe."; return; }
+    stopScan();
+    $("#dlg-scan").close();
+    return mode.onPlace(Number(target.value));
+  }
+  if (mode && mode.type === "collect") {
+    // Keep scanning: every piece tag scanned is moved into this place.
+    if (target.type !== "piece") { $("#scan-status").textContent = "That's not a piece tag. Scan the tags of pieces tracked piece by piece."; return; }
+    const serial = target.value.toUpperCase();
+    if (state.scanBusy || Date.now() - (state.scanSeen[serial] || 0) < 4000) return;
+    state.scanBusy = true;
+    state.scanSeen[serial] = Date.now();
+    const log = (msg, bad) => $("#scan-log").insertAdjacentHTML("afterbegin", `<li class="${bad ? "bad" : ""}">${esc(msg)}</li>`);
+    try {
+      const pc = await api("pieces/" + encodeURIComponent(serial));
+      if (pc.status !== "in") log(`✗ ${serial} is not in stock`, true);
+      else {
+        const res = await api(`products/${pc.product_id}/move`, { method: "POST", body: { to_location_id: mode.placeId, pieces: [serial] } });
+        log(res.moved ? `✓ ${serial} → ${placeName(mode.placeId)}` : `✓ ${serial} already here`);
+        try { navigator.vibrate && navigator.vibrate(60); } catch {}
+      }
+    } catch (err) { log(`✗ ${serial}: ${err.message}`, true); }
+    finally { state.scanBusy = false; }
+    return;
+  }
   $(".scan-view").classList.add("found");
   try { navigator.vibrate && navigator.vibrate(80); } catch {}
   stopScan();
@@ -880,13 +1066,15 @@ function onScanned(text) {
 // Understands this app's label links (…/#item=RIN-0001, …/#place=3) or a bare item code.
 function parseTarget(text) {
   const t = String(text || "").trim();
-  const m = /#(item|place)=([^&\s]+)/.exec(t);
+  const m = /#(item|place|piece)=([^&\s]+)/.exec(t);
   if (m) return { type: m[1], value: decodeURIComponent(m[2]) };
+  if (/^[A-Za-z]{2,}\d*-\d{4,}-\d{2,}$/.test(t)) return { type: "piece", value: t.toUpperCase() };
   if (/^[A-Za-z]{2,}\d*-\d{1,}$/.test(t)) return { type: "item", value: t.toUpperCase() };
   return null;
 }
 
 function goTo(target) {
+  if (target.type === "piece") return openPiece(target.value);
   if (target.type === "place") {
     const id = Number(target.value);
     if (!state.locations.some((l) => l.id === id)) return toast("That place doesn't exist any more", 4000);
@@ -1430,14 +1618,60 @@ function wire() {
   for (const id of ["#stock-place", "#item-place", "#move-to"]) $(id).addEventListener("change", onPlaceSelectChange);
   $("#place-filter").onchange = (e) => { state.placeFilter = e.target.value; render(); };
   $("#btn-scan").onclick = openScan;
-  $("#dlg-scan").addEventListener("close", stopScan);
+  $("#dlg-scan").addEventListener("close", () => {
+    stopScan();
+    const mode = state.scanMode;
+    state.scanMode = null;
+    if (mode && mode.type === "collect") refresh();
+  });
+  $("#stock-place").addEventListener("change", renderStockPieces);
+  $("#btn-scan-in").onclick = () => openScan({ type: "collect", placeId: state.openPlaceId });
+  $("#pieces-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-serial]");
+    if (b) { e.preventDefault(); openPiece(b.dataset.serial); }
+  });
+  $("#btn-pieces-all").onclick = () => {
+    const boxes = [...$("#pieces-list").querySelectorAll("input[type=checkbox]")];
+    const on = !boxes.every((c) => c.checked);
+    boxes.forEach((c) => { c.checked = on; });
+  };
+  $("#btn-pieces-move").onclick = () => {
+    const pick = pickedSerials($("#pieces-list"));
+    if (!pick.length) return toast("Tick the pieces to move first");
+    openMove(state.piecesOf, null, null, pick);
+  };
+  $("#btn-pieces-print").onclick = () => {
+    const pick = pickedSerials($("#pieces-list"));
+    const all = [...$("#pieces-list").querySelectorAll("input[type=checkbox]")].map((c) => c.value);
+    printLabels("pieces", (pick.length ? pick : all).map((serial) => ({ serial, p: state.piecesOf })));
+  };
+  $("#btn-piece-scan-place").onclick = () => {
+    const pc = state.piece;
+    $("#dlg-piece").close();
+    openScan({ type: "pickPlace", onPlace: async (id) => {
+      try { await movePiece(pc.serial, pc.product_id, id); } catch (err) { toast(err.message, 4000); }
+      openPiece(pc.serial);
+    } });
+  };
+  $("#btn-piece-move").onclick = async () => {
+    const pc = state.piece, to = $("#piece-to").value;
+    if (to === "__new") return;
+    try { await movePiece(pc.serial, pc.product_id, to); openPiece(pc.serial); } catch (err) { toast(err.message, 4000); }
+  };
+  $("#piece-to").addEventListener("change", onPlaceSelectChange);
+  $("#btn-piece-out").onclick = () => {
+    const pc = state.piece;
+    $("#dlg-piece").close();
+    openStock(pc.p, "out", pc.location_id == null ? "" : String(pc.location_id), [pc.serial]);
+  };
+  $("#btn-piece-tag").onclick = () => printLabels("pieces", [{ serial: state.piece.serial, p: state.piece.p }]);
   $("#form-code").onsubmit = (e) => {
     e.preventDefault();
     const code = e.target.code.value.trim();
     if (!code) return;
     stopScan();
     $("#dlg-scan").close();
-    goTo({ type: "item", value: code });
+    goTo(parseTarget(code) || { type: "item", value: code });
   };
   $("#btn-menu").onclick = () => $("#dlg-menu").showModal();
   $("#dlg-menu").onclick = (e) => {
@@ -1451,7 +1685,18 @@ function wire() {
     else if (m === "export") exportCsv();
   };
   $("#form-labels").addEventListener("change", updateLabelsForm);
-  $("#form-labels").onsubmit = (e) => { e.preventDefault(); printLabels($("#form-labels").kind.value, labelsSelection()); };
+  $("#form-labels").onsubmit = async (e) => {
+    e.preventDefault();
+    const kind = $("#form-labels").kind.value;
+    if (kind !== "pieces") return printLabels(kind, labelsSelection());
+    try {
+      const all = [];
+      for (const p of labelsSelection()) {
+        for (const x of await api(`products/${p.id}/pieces`)) if (x.status === "in") all.push({ serial: x.serial, p });
+      }
+      printLabels("pieces", all);
+    } catch (err) { toast(err.message, 4000); }
+  };
   window.addEventListener("hashchange", handleHash);
   $("#ps-camera").onchange = runPhotoSearch;
   $("#ps-gallery").onchange = runPhotoSearch;
@@ -1524,6 +1769,7 @@ function wire() {
     else if (act === "photo") openPhoto(p);
     else if (act === "move") openMove(p);
     else if (act === "label") printLabels("items", [p]);
+    else if (act === "pieces") openPieces(p);
     else openStock(p, act);
   };
 }
