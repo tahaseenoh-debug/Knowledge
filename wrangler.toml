@@ -5,5 +5,4 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "jewellery-inventory"
-# Paste your D1 database ID here (Cloudflare dashboard -> Storage & Databases -> D1).
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "4d81a2fa-7535-4867-b3c6-9ff9300f1002"
