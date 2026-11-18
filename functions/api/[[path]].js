@@ -15,6 +15,11 @@
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
 //   GET    /me                          (who is signed in)
+//   GET    /locations                   (places + piece counts)
+//   POST   /locations                   {name}
+//   PUT    /locations/:id               {name}         (owner)
+//   DELETE /locations/:id               (owner, only when empty)
+//   POST   /products/:id/move           {from_location_id, to_location_id, qty, note?}
 //   GET    /photo-index                 (photo fingerprints for search by photo)
 //   PUT    /products/:id/photo-vec      {vec, v}  (fingerprint for the current photo)
 //   GET    /incidents?after=&status=open|all   (emergency reports + open_count)
@@ -83,6 +88,16 @@ const SCHEMA = [
     at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (incident_id, by_user))`,
   `CREATE INDEX IF NOT EXISTS idx_incident_photos ON incident_photos(incident_id)`,
+  `CREATE TABLE IF NOT EXISTS locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE TABLE IF NOT EXISTS product_locations (
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    qty INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (product_id, location_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_product_locations_loc ON product_locations(location_id)`,
   `CREATE TABLE IF NOT EXISTS photo_vectors (
     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
     photo_v TEXT NOT NULL,
@@ -94,6 +109,9 @@ const ADDED_COLUMNS = [
   ["products", "colour", "TEXT"],
   ["products", "created_by", "TEXT"],
   ["movements", "by_user", "TEXT"],
+  ["movements", "location", "TEXT"],     // place the pieces went into / out of
+  ["movements", "to_location", "TEXT"],  // for moves: where they went
+  ["movements", "moved", "INTEGER"],     // for moves: how many pieces
 ];
 
 let schemaReady = false;
@@ -243,8 +261,43 @@ function productValues(body) {
 
 const PRODUCT_SELECT = `SELECT p.*, c.name AS category,
   (SELECT updated_at FROM product_photos ph WHERE ph.product_id = p.id) AS photo_v,
-  (SELECT photo_v FROM photo_vectors pv WHERE pv.product_id = p.id) AS vec_v
+  (SELECT photo_v FROM photo_vectors pv WHERE pv.product_id = p.id) AS vec_v,
+  (SELECT json_group_array(json_object('id', l.id, 'name', l.name, 'qty', pl.qty))
+     FROM product_locations pl JOIN locations l ON l.id = pl.location_id
+     WHERE pl.product_id = p.id AND pl.qty > 0) AS locs
   FROM products p JOIN categories c ON c.id = p.category_id`;
+
+// Stock is counted per place. Pieces not in any place are "place not set"
+// (all stock from before places existed starts there).
+function productRow(p) {
+  const locations = JSON.parse(p.locs || "[]").sort((a, b) => a.name.localeCompare(b.name));
+  const placed = locations.reduce((n, l) => n + l.qty, 0);
+  const { locs, ...rest } = p;
+  return { ...rest, locations, unassigned: Math.max(0, p.qty - placed) };
+}
+
+async function getLocation(db, id) {
+  if (!id) return null;
+  const l = await db.prepare("SELECT id, name FROM locations WHERE id = ?").bind(id).first();
+  if (!l) throw new HttpError(400, "That place doesn't exist any more. Reload the page.");
+  return l;
+}
+
+const addToPlace = (db, productId, locationId, n) => db.prepare(
+  `INSERT INTO product_locations (product_id, location_id, qty) VALUES (?, ?, ?)
+   ON CONFLICT(product_id, location_id) DO UPDATE SET qty = qty + excluded.qty`).bind(productId, locationId, n);
+
+// Takes n pieces out of a place; returns false if there aren't enough there.
+async function takeFromPlace(db, productId, locationId, n) {
+  const r = await db.prepare(
+    `UPDATE product_locations SET qty = qty - ? WHERE product_id = ? AND location_id = ? AND qty >= ? RETURNING qty`)
+    .bind(n, productId, locationId, n).first();
+  if (r && r.qty === 0) {
+    await db.prepare("DELETE FROM product_locations WHERE product_id = ? AND location_id = ? AND qty = 0")
+      .bind(productId, locationId).run();
+  }
+  return !!r;
+}
 
 // Photos are resized in the browser (about 1000px JPEG, usually 100-250 KB) and kept in D1,
 // so no extra storage service has to be set up.
@@ -295,7 +348,7 @@ async function getIncident(db, id) {
 async function getProduct(db, id) {
   const p = await db.prepare(PRODUCT_SELECT + " WHERE p.id = ?").bind(id).first();
   if (!p) throw new HttpError(404, "Item not found");
-  return p;
+  return productRow(p);
 }
 
 async function readBody(request) {
@@ -481,6 +534,47 @@ async function route(request, env, parts, user, waitUntil) {
     }
   }
 
+  // ---------- places (locations) ----------
+  if (resource === "locations") {
+    if (method === "GET" && id === null) {
+      const { results } = await db.prepare(
+        `SELECT l.id, l.name, COUNT(pl.product_id) AS items, COALESCE(SUM(pl.qty), 0) AS pieces
+         FROM locations l LEFT JOIN product_locations pl ON pl.location_id = l.id AND pl.qty > 0
+         GROUP BY l.id ORDER BY l.name COLLATE NOCASE`).all();
+      const t = await db.prepare(
+        `SELECT (SELECT COALESCE(SUM(qty), 0) FROM products) - (SELECT COALESCE(SUM(qty), 0) FROM product_locations) AS n`).first();
+      return json({ locations: results, unassigned_pieces: t.n });
+    }
+    if (method === "POST" && id === null) {
+      const body = await readBody(request);
+      const name = clean(body.name);
+      if (!name) throw new HttpError(400, "Place name is required");
+      const existing = await db.prepare("SELECT id, name FROM locations WHERE name = ?").bind(name).first();
+      if (existing) return json(existing);
+      return json(await db.prepare("INSERT INTO locations (name) VALUES (?) RETURNING id, name").bind(name).first(), 201);
+    }
+    if (method === "PUT" && id !== null) {
+      requireOwner(user, env, "rename places");
+      const name = clean((await readBody(request)).name);
+      if (!name) throw new HttpError(400, "Place name is required");
+      const clash = await db.prepare("SELECT id FROM locations WHERE name = ? AND id != ?").bind(name, id).first();
+      if (clash) throw new HttpError(409, "Another place already has that name");
+      const row = await db.prepare("UPDATE locations SET name = ? WHERE id = ? RETURNING id, name").bind(name, id).first();
+      if (!row) throw new HttpError(404, "Place not found");
+      return json(row);
+    }
+    if (method === "DELETE" && id !== null) {
+      requireOwner(user, env, "delete places");
+      const used = await db.prepare("SELECT COALESCE(SUM(qty), 0) AS n FROM product_locations WHERE location_id = ?").bind(id).first();
+      if (used.n > 0) throw new HttpError(409, `${used.n} piece(s) are still there. Move them first.`);
+      await db.batch([
+        db.prepare("DELETE FROM product_locations WHERE location_id = ?").bind(id),
+        db.prepare("DELETE FROM locations WHERE id = ?").bind(id),
+      ]);
+      return json({ ok: true });
+    }
+  }
+
   // ---------- categories ----------
   if (resource === "categories") {
     if (method === "GET" && id === null) {
@@ -538,7 +632,7 @@ async function route(request, env, parts, user, waitUntil) {
       const sql = PRODUCT_SELECT + (where.length ? " WHERE " + where.join(" AND ") : "") +
         " ORDER BY p.updated_at DESC, p.id DESC";
       const { results } = await db.prepare(sql).bind(...args).all();
-      return json(results);
+      return json(results.map(productRow));
     }
     if (method === "GET" && id !== null && !sub) return json(await getProduct(db, id));
 
@@ -546,6 +640,7 @@ async function route(request, env, parts, user, waitUntil) {
       const body = await readBody(request);
       const v = productValues(body);
       const openingQty = Math.max(0, int(body.qty, 0));
+      const openingPlace = openingQty > 0 ? await getLocation(db, int(body.location_id)) : null;
       // Atomically take the next number for this category to build the code, e.g. RIN-0007.
       const cat = await db.prepare(
         "UPDATE categories SET next_num = next_num + 1 WHERE id = ? RETURNING prefix, next_num")
@@ -558,8 +653,9 @@ async function route(request, env, parts, user, waitUntil) {
         .bind(code, ...PRODUCT_FIELDS.map((f) => v[f]), openingQty, by).first();
       if (openingQty > 0) {
         await db.prepare(
-          "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user) VALUES (?, ?, ?, 'Opening stock', NULL, ?)")
-          .bind(row.id, openingQty, openingQty, by).run();
+          "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location) VALUES (?, ?, ?, 'Opening stock', NULL, ?, ?)")
+          .bind(row.id, openingQty, openingQty, by, openingPlace && openingPlace.name).run();
+        if (openingPlace) await addToPlace(db, row.id, openingPlace.id, openingQty).run();
       }
       return json(await getProduct(db, row.id), 201);
     }
@@ -583,6 +679,7 @@ async function route(request, env, parts, user, waitUntil) {
         db.prepare("DELETE FROM movements WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM product_photos WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM photo_vectors WHERE product_id = ?").bind(id),
+        db.prepare("DELETE FROM product_locations WHERE product_id = ?").bind(id),
         db.prepare("UPDATE incidents SET product_id = NULL WHERE product_id = ?").bind(id),
         db.prepare("DELETE FROM products WHERE id = ?").bind(id),
       ]);
@@ -592,22 +689,66 @@ async function route(request, env, parts, user, waitUntil) {
       const body = await readBody(request);
       const change = int(body.change);
       if (!change) throw new HttpError(400, "Quantity must be a non-zero whole number");
-      const updated = await db.prepare(
-        `UPDATE products SET qty = qty + ?, updated_at = datetime('now')
-         WHERE id = ? AND qty + ? >= 0 RETURNING qty`).bind(change, id, change).first();
-      if (!updated) {
-        const p = await getProduct(db, id); // throws 404 if missing
-        throw new HttpError(409, `Not enough stock: only ${p.qty} available`);
+      const before = await getProduct(db, id); // 404 if missing
+      const place = await getLocation(db, int(body.location_id));
+      let updated;
+      if (change > 0) {
+        updated = await db.prepare(
+          "UPDATE products SET qty = qty + ?, updated_at = datetime('now') WHERE id = ? RETURNING qty")
+          .bind(change, id).first();
+        if (place) await addToPlace(db, id, place.id, change).run();
+      } else if (place) {
+        if (!(await takeFromPlace(db, id, place.id, -change))) {
+          const have = (before.locations.find((l) => l.id === place.id) || { qty: 0 }).qty;
+          throw new HttpError(409, `Only ${have} at ${place.name}. Choose the place it's taken from.`);
+        }
+        updated = await db.prepare(
+          "UPDATE products SET qty = qty + ?, updated_at = datetime('now') WHERE id = ? RETURNING qty")
+          .bind(change, id).first();
+      } else {
+        // Taking from "place not set": only the pieces that aren't in any place.
+        updated = await db.prepare(
+          `UPDATE products SET qty = qty + ?, updated_at = datetime('now')
+           WHERE id = ? AND qty - (SELECT COALESCE(SUM(qty), 0) FROM product_locations WHERE product_id = ?) + ? >= 0
+           RETURNING qty`).bind(change, id, id, change).first();
+        if (!updated) {
+          throw new HttpError(409, before.locations.length
+            ? `Only ${before.unassigned} without a place. Choose the place it's taken from.`
+            : `Not enough stock: only ${before.qty} available`);
+        }
       }
       await db.prepare(
-        "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(id, change, updated.qty, clean(body.reason), clean(body.note), by).run();
+        "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(id, change, updated.qty, clean(body.reason), clean(body.note), by, place && place.name).run();
       const product = await getProduct(db, id);
       const oldQty = updated.qty - change;
       const msg = telegramReady(env) && lowStockMessage(product, oldQty, change, clean(body.reason), by, url.origin);
       // Sent in the background so the stock update returns straight away.
       if (msg) waitUntil(sendTelegram(env, msg).catch((e) => console.error("Low-stock alert failed:", e.message)));
       return json(product);
+    }
+    if (method === "POST" && id !== null && sub === "move") {
+      const body = await readBody(request);
+      const n = int(body.qty);
+      if (!n || n < 1) throw new HttpError(400, "Quantity must be 1 or more");
+      const p = await getProduct(db, id);
+      const from = await getLocation(db, int(body.from_location_id));
+      const to = await getLocation(db, int(body.to_location_id));
+      if ((from && from.id) === (to && to.id)) throw new HttpError(400, "Choose a different place to move to");
+      if (from) {
+        if (!(await takeFromPlace(db, id, from.id, n))) {
+          const have = (p.locations.find((l) => l.id === from.id) || { qty: 0 }).qty;
+          throw new HttpError(409, `Only ${have} at ${from.name}`);
+        }
+      } else if (p.unassigned < n) {
+        throw new HttpError(409, `Only ${p.unassigned} without a place`);
+      }
+      if (to) await addToPlace(db, id, to.id, n).run();
+      await db.prepare(
+        `INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, to_location, moved)
+         VALUES (?, 0, ?, 'Moved', ?, ?, ?, ?, ?)`)
+        .bind(id, p.qty, clean(body.note), by, from ? from.name : "Place not set", to ? to.name : "Place not set", n).run();
+      return json(await getProduct(db, id));
     }
     if (sub === "photo" && id !== null) {
       if (method === "GET") {

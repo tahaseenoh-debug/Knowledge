@@ -13,9 +13,9 @@
     <div class="me" id="me" hidden></div>
     <div class="top-actions">
       <button class="ghost bell" id="btn-alerts" type="button" aria-label="Low stock alerts" title="Low stock alerts">🔔<span class="bell-n" id="bell-n" hidden></span></button>
-      <button class="ghost" id="btn-activity" type="button">Activity</button>
-      <button class="ghost" id="btn-categories" type="button">Categories</button>
-      <button class="ghost" id="btn-export" type="button" title="Download as CSV (opens in Excel)">Export</button>
+      <button class="ghost" id="btn-scan" type="button" title="Scan a QR label">📷 Scan</button>
+      <button class="ghost" id="btn-places" type="button">📍 Places</button>
+      <button class="ghost" id="btn-menu" type="button" aria-label="More">☰ More</button>
       <button class="primary" id="btn-add" type="button">+ Add item</button>
     </div>
   </header>
@@ -26,6 +26,7 @@
     <section class="filters">
       <input type="search" id="search" placeholder="Search by name, code, metal, colour, stone…" autocomplete="off">
       <button class="ghost photo-search-btn" id="btn-photo-search" type="button">📷 Search by photo</button>
+      <select id="place-filter" aria-label="Filter by place" class="place-filter"></select>
       <label class="check"><input type="checkbox" id="low-only"> Low stock only</label>
     </section>
     <nav class="chips" id="chips" aria-label="Categories"></nav>
@@ -65,6 +66,119 @@
       </div>
     </form>
   </dialog>
+
+  <!-- More menu -->
+  <dialog id="dlg-menu" class="menu-dlg">
+    <div class="dlg-body">
+      <h2>More</h2>
+      <button type="button" class="menu-item" data-menu="activity">🕘 Activity (stock history)</button>
+      <button type="button" class="menu-item" data-menu="categories">🗂 Categories</button>
+      <button type="button" class="menu-item" data-menu="labels">🖨 Print QR labels</button>
+      <button type="button" class="menu-item" data-menu="export">⬇️ Export to Excel (CSV)</button>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Places manager -->
+  <dialog id="dlg-places">
+    <div class="dlg-body">
+      <h2>📍 Places</h2>
+      <p class="muted">Where your pieces are kept: showroom cases, trays, the safe, the workshop, a branch… Saved once, reused everywhere.</p>
+      <form id="form-place" class="row">
+        <input name="name" placeholder="New place, e.g. Showroom Case 1" required>
+        <button class="primary" type="submit">Add</button>
+      </form>
+      <p class="error" id="place-error" hidden></p>
+      <ul id="place-list" class="place-list"></ul>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-print-places">🖨 Print place labels</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- One place: what's here -->
+  <dialog id="dlg-place">
+    <div class="dlg-body">
+      <h2 id="place-title">📍 Place</h2>
+      <p class="muted" id="place-sub"></p>
+      <div id="place-items" class="place-items"></div>
+      <div class="put-here" id="put-here">
+        <select id="put-item" aria-label="Item to put here"></select>
+        <button type="button" class="primary" id="btn-put-here">Put here</button>
+      </div>
+      <div class="actions">
+        <button type="button" class="ghost" id="btn-place-label">🖨 Label</button>
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Move pieces between places -->
+  <dialog id="dlg-move">
+    <form id="form-move" method="dialog">
+      <h2 id="move-title">⇄ Move</h2>
+      <p class="muted" id="move-sub"></p>
+      <label>From<select name="from" id="move-from"></select></label>
+      <label>To<select name="to" id="move-to"></select></label>
+      <label>How many
+        <div class="stepper">
+          <button type="button" data-step="-1" aria-label="Less">−</button>
+          <input name="qty" type="number" min="1" step="1" value="1" inputmode="numeric" required>
+          <button type="button" data-step="1" aria-label="More">+</button>
+        </div>
+      </label>
+      <label>Note<input name="note" placeholder="e.g. For display, sent for polishing (optional)"></label>
+      <p class="error" id="move-error" hidden></p>
+      <div class="actions">
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Move</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- QR scanner -->
+  <dialog id="dlg-scan" class="scan-dlg">
+    <div class="dlg-body">
+      <h2>📷 Scan a QR label</h2>
+      <div class="scan-view">
+        <video id="scan-video" playsinline muted></video>
+        <div class="scan-frame" aria-hidden="true"></div>
+      </div>
+      <p class="muted" id="scan-status" role="status">Starting camera…</p>
+      <form id="form-code" class="row">
+        <input name="code" placeholder="Or type an item code, e.g. RIN-0001" autocomplete="off" autocapitalize="characters">
+        <button type="submit" class="ghost">Find</button>
+      </form>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Print labels -->
+  <dialog id="dlg-labels">
+    <form id="form-labels" method="dialog">
+      <h2>🖨 Print QR labels</h2>
+      <p class="muted">Print on sticker paper (or plain paper and tape). Scan them with the 📷 Scan button, or with any phone camera.</p>
+      <fieldset class="label-kind">
+        <label class="check"><input type="radio" name="kind" value="places" checked> Place labels (big, for trays, drawers, the safe…)</label>
+        <label class="check"><input type="radio" name="kind" value="items"> Item tags (small, for pieces or boxes)</label>
+      </fieldset>
+      <label id="labels-which-wrap" hidden>Which items
+        <select name="which" id="labels-which"></select>
+      </label>
+      <p class="muted" id="labels-count"></p>
+      <div class="actions">
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close>Cancel</button>
+        <button type="submit" class="primary">Print</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="print-area" aria-hidden="true"></div>
 
   <!-- Search by photo -->
   <dialog id="dlg-psearch">
@@ -157,6 +271,7 @@
         <label>Supplier<input name="supplier" list="suppliers"></label>
         <label>Low-stock alert at<input name="low_stock" type="number" step="1" min="0" value="1" inputmode="numeric"></label>
         <label id="opening-wrap">Opening stock<input name="qty" type="number" step="1" min="0" value="0" inputmode="numeric"></label>
+        <label id="opening-place-wrap">Put it in<select name="location_id" id="item-place"></select></label>
         <label class="full">Notes<textarea name="notes" rows="2"></textarea></label>
       </div>
       <p class="error" id="item-error" hidden></p>
@@ -185,6 +300,7 @@
           <button type="button" data-step="1" aria-label="More">+</button>
         </div>
       </label>
+      <label id="stock-place-wrap"><span id="stock-place-label">Place</span><select name="location_id" id="stock-place"></select></label>
       <label>Reason<select name="reason" id="stock-reason"></select></label>
       <label>Note<input name="note" placeholder="Customer name, invoice no., etc. (optional)"></label>
       <p class="error" id="stock-error" hidden></p>

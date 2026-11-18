@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS movements (
   reason     TEXT,
   note       TEXT,
   by_user    TEXT,              -- staff member who made the change
+  location   TEXT,              -- place the pieces went into / out of
+  to_location TEXT,             -- for moves: where they went
+  moved      INTEGER,           -- for moves: how many pieces
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -89,3 +92,20 @@ CREATE TABLE IF NOT EXISTS photo_vectors (
   photo_v    TEXT NOT NULL,   -- which version of the photo this was made from
   vec        TEXT NOT NULL    -- 1280 signed bytes, base64
 );
+
+-- Places (showroom cases, safe, back room, workshop, branch...) and how many pieces of each item are there.
+-- Pieces of an item that aren't in any place count as "place not set".
+CREATE TABLE IF NOT EXISTS locations (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS product_locations (
+  product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  location_id INTEGER NOT NULL REFERENCES locations(id),
+  qty         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (product_id, location_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_locations_loc ON product_locations(location_id);

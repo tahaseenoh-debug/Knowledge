@@ -10,6 +10,18 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
 - **History**: every movement is logged per item, and **Activity** shows recent changes across all items.
 - **Photos**: take a picture with the phone camera or pick one from the gallery. It's shrunk automatically to about 100–250 KB and saved in the same free database, so there's nothing extra to set up. Tap a thumbnail to see it full size.
 - **Jewellery details**: metal, purity (22K / 18K / 925…), colour (shown with a small colour dot), weight in grams, stone, size, cost and selling price, supplier, notes.
+- **📍 Places (locations)**: keep track of where pieces are (showroom cases, trays, safe, workshop, craftsman, branch…).
+  - Places are saved once and reused, like categories.
+  - Stock is counted **per place**: each item shows e.g. "📍 Case 1 ×3 · Safe ×2".
+  - **Move** pieces between places; every move is recorded in History with who did it.
+  - Stock in asks where it's going, and stock out asks where it's taken from.
+  - **Filter the list by place**, or open a place to see everything that should be there, with − / + / ⇄ buttons.
+  - Stock from before places existed shows as **"Place not set"** until you move it somewhere.
+- **📷 QR labels and scanning, no scanner machine needed**:
+  - **☰ More → Print QR labels**: big labels for places (stick on trays, drawers, the safe) and small tags for items. Print on sticker paper, or plain paper and tape.
+  - **📷 Scan** uses the phone camera: scan a place label to see what should be there, or an item tag to see where its pieces are.
+  - The labels also work with the phone's **normal camera app**, which opens the app straight on that place or item.
+  - No label? Type the item code in the scan window instead.
 - **Low-stock notifications**:
   - a 🔔 bell with a red count of items that are low or sold out; tap it to see the list and restock with one tap
   - a warning pop-up the moment a sale makes an item low ("⚠️ RIN-0001 is now low: only 1 left")

@@ -10,6 +10,11 @@ const state = {
   editing: null,   // product being edited
   stockItem: null, // product in stock dialog
   me: { owner: true },
+  locations: [],          // places
+  unassignedPieces: 0,
+  placeFilter: "",        // "" = all, "none" = place not set, or a place id
+  move: null,             // {product} for the move dialog
+  openPlaceId: null,      // place shown in the place dialog (id or "none")
   report: { photos: [] }, // emergency report being written
   alarmQueue: [],         // incoming reports waiting to be shown
   openIncidents: 0,
@@ -118,8 +123,18 @@ async function loadProducts() {
   render();
 }
 
+async function loadLocations() {
+  const res = await api("locations");
+  state.locations = res.locations;
+  state.unassignedPieces = res.unassigned_pieces;
+  renderPlaceFilter();
+  renderPlaceList();
+}
+
 async function refresh() {
-  await Promise.all([loadCategories(), loadProducts()]);
+  await Promise.all([loadCategories(), loadLocations(), loadProducts()]);
+  render(); // places line needs both lists
+  if ($("#dlg-place").open) renderPlace();
 }
 
 // ---------- rendering ----------
@@ -128,6 +143,9 @@ function visibleProducts() {
   return state.products.filter((p) => {
     if (state.activeCat && p.category_id !== state.activeCat) return false;
     if (state.lowOnly && p.qty > p.low_stock) return false;
+    if (state.placeFilter === "none" && !p.unassigned) return false;
+    if (state.placeFilter && state.placeFilter !== "none" &&
+        !(p.locations || []).some((l) => l.id === Number(state.placeFilter))) return false;
     if (q) {
       const hay = [p.code, p.name, p.category, p.metal, p.purity, p.colour, p.stone, p.size, p.supplier, p.notes].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
@@ -181,9 +199,12 @@ function itemHtml(p) {
     <div>
       <div class="head"><span class="code">${esc(p.code)}</span><span class="name">${esc(p.name)}</span>${badge}</div>
       <div class="meta">${meta}</div>
+      ${placesHtml(p)}
       <div class="links">
         <button class="linkbtn" data-act="edit">Edit</button>
         <button class="linkbtn" data-act="history">History</button>
+        ${p.qty > 0 && state.locations.length ? '<button class="linkbtn" data-act="move">Move</button>' : ""}
+        <button class="linkbtn" data-act="label">QR tag</button>
       </div>
     </div>
     <div class="qty">
@@ -263,6 +284,8 @@ function openItem(product = null) {
   $("#item-code").textContent = product ? "Code: " + product.code : "";
   $("#btn-delete-item").hidden = !product || !state.me.owner;
   $("#opening-wrap").hidden = !!product;
+  $("#opening-place-wrap").hidden = !!product || !state.locations.length;
+  if (!product) fillPlaceSelect($("#item-place"), { mode: "in", selected: lastPlace() });
   renderCategorySelect(product ? product.category_id : state.activeCat || "");
   state.photo = null;
   $("#photo-input").value = "";
@@ -389,10 +412,17 @@ function setStockDir(dir) {
   const form = $("#form-stock");
   form.dir.value = dir;
   $("#stock-reason").innerHTML = REASONS[dir].map((r) => `<option>${r}</option>`).join("");
+  const p = state.stockItem;
+  $("#stock-place-wrap").hidden = !state.locations.length && !(p && p.locations.length);
+  $("#stock-place-label").textContent = dir === "in" ? "Put it in" : "Taken from";
+  const pref = state.stockPlace != null ? state.stockPlace : dir === "in" ? (biggestPlace(p) ?? lastPlace()) : biggestPlace(p);
+  fillPlaceSelect($("#stock-place"), { mode: dir, product: p, selected: pref });
 }
 
-function openStock(product, dir) {
+// placeId: the place the dialog was opened from (if any), so it's pre-selected.
+function openStock(product, dir, placeId = null) {
   state.stockItem = product;
+  state.stockPlace = placeId;
   const form = $("#form-stock");
   form.reset();
   $("#stock-error").hidden = true;
@@ -415,8 +445,9 @@ async function saveStock(e) {
   btn.disabled = true;
   try {
     const p = await api(`products/${state.stockItem.id}/stock`, {
-      method: "POST", body: { change, reason: form.reason.value, note: form.note.value },
+      method: "POST", body: { change, reason: form.reason.value, note: form.note.value, location_id: form.location_id.value },
     });
+    if (dir === "in") rememberPlace(form.location_id.value);
     $("#dlg-stock").close();
     const old = p.qty - change;
     if (change < 0 && p.qty === 0) toast(`🔴 ${p.code} ${p.name} is now OUT OF STOCK`, 5000);
@@ -429,11 +460,14 @@ async function saveStock(e) {
 
 // ---------- history ----------
 function movementHtml(m, withItem) {
-  const dir = m.change > 0 ? "in" : "out";
+  const isMove = m.moved > 0;
+  const dir = isMove ? "move" : m.change > 0 ? "in" : "out";
   const title = withItem ? `<b>${esc(m.code)}</b> ${esc(m.name)}` : esc(m.reason || (dir === "in" ? "Stock in" : "Stock out"));
+  const where = isMove ? `📍 ${m.location} → ${m.to_location}` : m.location ? `📍 ${m.location}` : null;
   const sub = [m.by_user ? `<span class="by">by ${esc(m.by_user)}</span>` : "",
-    ...[withItem ? m.reason : null, m.note, `Balance ${m.qty_after}`].filter(Boolean).map(esc)].filter(Boolean).join(" · ");
-  return `<div class="mv"><span class="chg ${dir}">${m.change > 0 ? "+" : ""}${m.change}</span>
+    ...[withItem ? m.reason : null, where, m.note, isMove ? null : `Balance ${m.qty_after}`].filter(Boolean).map(esc)].filter(Boolean).join(" · ");
+  const badge = isMove ? `⇄${m.moved}` : `${m.change > 0 ? "+" : ""}${m.change}`;
+  return `<div class="mv"><span class="chg ${dir}">${badge}</span>
     <span class="what">${title}<small>${sub}</small></span><span class="when">${fmtDate(m.created_at)}</span></div>`;
 }
 
@@ -509,6 +543,369 @@ function remindLowOnce() {
   try { if (sessionStorage.getItem("low-reminded")) return; sessionStorage.setItem("low-reminded", "1"); } catch {}
   const n = lowItems().length;
   if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
+}
+
+// ---------- places ----------
+const placeName = (id) => id === "none" || id === "" || id == null
+  ? "Place not set" : (state.locations.find((l) => l.id === Number(id)) || {}).name || "?";
+function lastPlace() { try { return localStorage.getItem("last-place") || ""; } catch { return ""; } }
+function rememberPlace(id) { try { localStorage.setItem("last-place", id || ""); } catch {} }
+// The place that holds most of this item (or "" for place not set).
+function biggestPlace(p) {
+  if (!p) return null;
+  const best = [...p.locations].sort((a, b) => b.qty - a.qty)[0];
+  if (!best) return p.unassigned ? "" : null;
+  return best.qty >= p.unassigned ? String(best.id) : "";
+}
+
+function placesHtml(p) {
+  if (!state.locations.length && !p.locations.length) return "";
+  const parts = p.locations.map((l) => `<span class="pl">${esc(l.name)} ×<b>${l.qty}</b></span>`);
+  if (p.unassigned) parts.push(`<span class="pl unset">Place not set ×<b>${p.unassigned}</b></span>`);
+  if (!parts.length) return "";
+  return `<div class="places">📍 ${parts.join(" · ")}</div>`;
+}
+
+// Fills a place <select>.
+//  mode "in":   every place + "Place not set" + "New place…"
+//  mode "out":  only places holding this product, with counts
+//  mode "to":   every place except `exclude`, + "Place not set" + "New place…"
+function fillPlaceSelect(sel, { mode, product, selected, exclude }) {
+  const opts = [];
+  if (mode === "out") {
+    for (const l of product.locations) opts.push([String(l.id), `${l.name} (${l.qty})`]);
+    if (product.unassigned) opts.push(["", `Place not set (${product.unassigned})`]);
+    if (!opts.length) opts.push(["", "Place not set"]);
+  } else {
+    for (const l of state.locations) if (String(l.id) !== String(exclude)) opts.push([String(l.id), l.name]);
+    if (exclude !== "") opts.push(["", "Place not set"]);
+    opts.push(["__new", "➕ New place…"]);
+  }
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+  const want = selected == null ? null : String(selected);
+  if (want !== null && opts.some(([v]) => v === want)) sel.value = want;
+  sel.dataset.prev = sel.value;
+}
+
+// Choosing "➕ New place…" in any place <select> creates the place and selects it.
+async function onPlaceSelectChange(e) {
+  const sel = e.target;
+  if (sel.value !== "__new") { sel.dataset.prev = sel.value; return; }
+  const name = prompt("New place name (e.g. Showroom Case 2, Safe, Workshop):");
+  if (!name || !name.trim()) { sel.value = sel.dataset.prev || ""; return; }
+  try {
+    const loc = await api("locations", { method: "POST", body: { name } });
+    await loadLocations();
+    const mode = sel.id === "move-to" ? "to" : "in";
+    fillPlaceSelect(sel, { mode, product: state.move && state.move.product, selected: loc.id,
+      exclude: sel.id === "move-to" ? $("#move-from").value : undefined });
+    toast(`Place "${loc.name}" saved`);
+  } catch (err) { toast(err.message, 4000); sel.value = sel.dataset.prev || ""; }
+}
+
+function renderPlaceFilter() {
+  const sel = $("#place-filter");
+  const opts = [["", "📍 All places"], ...state.locations.map((l) => [String(l.id), `${l.name} (${l.pieces})`])];
+  if (state.locations.length && state.unassignedPieces) opts.push(["none", `Place not set (${state.unassignedPieces})`]);
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+  if (!opts.some(([v]) => v === state.placeFilter)) state.placeFilter = "";
+  sel.value = state.placeFilter;
+  sel.hidden = !state.locations.length;
+}
+
+function renderPlaceList() {
+  const rows = state.locations.map((l) => `
+    <li data-id="${l.id}">
+      <button type="button" class="nm" data-act="open">${esc(l.name)}<small>${l.items} item${l.items === 1 ? "" : "s"} · ${l.pieces} piece${l.pieces === 1 ? "" : "s"}</small></button>
+      <button type="button" class="ghost" data-act="open">Open</button>
+      <button type="button" class="ghost" data-act="label">🖨 Label</button>
+      ${state.me.owner ? `<button type="button" class="ghost" data-act="rename">Rename</button>
+        <button type="button" class="ghost danger" data-act="delete" ${l.pieces ? "disabled title='Move the pieces out first'" : ""}>Delete</button>` : ""}
+    </li>`);
+  if (state.unassignedPieces > 0) {
+    rows.push(`<li class="unset" data-id="none"><button type="button" class="nm" data-act="open">Place not set<small>${state.unassignedPieces} piece${state.unassignedPieces === 1 ? "" : "s"} without a place yet</small></button>
+      <button type="button" class="ghost" data-act="open">Open</button></li>`);
+  }
+  $("#place-list").innerHTML = rows.join("") || '<li class="muted">No places yet. Add your first one above.</li>';
+}
+
+async function addPlace(e) {
+  e.preventDefault();
+  const form = e.target, err = $("#place-error");
+  err.hidden = true;
+  try {
+    const loc = await api("locations", { method: "POST", body: { name: form.name.value } });
+    form.reset();
+    await refresh();
+    toast(`Place "${loc.name}" saved`);
+  } catch (e2) { showError(err, e2); }
+}
+
+async function placeListAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const li = btn.closest("li");
+  const id = li.dataset.id === "none" ? "none" : Number(li.dataset.id);
+  const loc = state.locations.find((l) => l.id === id);
+  const err = $("#place-error");
+  err.hidden = true;
+  try {
+    if (btn.dataset.act === "open") openPlace(id);
+    else if (btn.dataset.act === "label") printLabels("places", [loc]);
+    else if (btn.dataset.act === "rename") {
+      const name = prompt("Rename place:", loc.name);
+      if (!name || name.trim() === loc.name) return;
+      await api("locations/" + id, { method: "PUT", body: { name } });
+      await refresh();
+    } else if (btn.dataset.act === "delete") {
+      if (!confirm(`Delete the place "${loc.name}"?`)) return;
+      await api("locations/" + id, { method: "DELETE" });
+      if (String(state.placeFilter) === String(id)) state.placeFilter = "";
+      await refresh();
+    }
+  } catch (e2) { showError(err, e2); }
+}
+
+// ----- one place: what's here -----
+function openPlace(id) {
+  state.openPlaceId = id;
+  if (!$("#dlg-place").open) $("#dlg-place").showModal();
+  renderPlace();
+}
+
+function renderPlace() {
+  const id = state.openPlaceId;
+  const none = id === "none";
+  const loc = none ? null : state.locations.find((l) => l.id === Number(id));
+  if (!none && !loc) { $("#dlg-place").close(); toast("That place doesn't exist any more", 4000); return; }
+  const here = (p) => none ? p.unassigned : ((p.locations.find((l) => l.id === loc.id) || {}).qty || 0);
+  const items = state.products.filter((p) => here(p) > 0).sort((a, b) => a.code.localeCompare(b.code));
+  const pieces = items.reduce((n, p) => n + here(p), 0);
+  $("#place-title").textContent = "📍 " + (none ? "Place not set" : loc.name);
+  $("#place-sub").textContent = none
+    ? `${pieces} piece${pieces === 1 ? "" : "s"} not in any place yet. Use ⇄ to put them where they really are.`
+    : `${items.length} item${items.length === 1 ? "" : "s"} · ${pieces} piece${pieces === 1 ? "" : "s"} here. Check them against what you see.`;
+  $("#place-items").innerHTML = items.map((p) => `
+    <div class="pi-row" data-id="${p.id}">
+      <div class="th">${p.photo_v ? `<img src="${photoUrl(p)}" alt="" loading="lazy">` : "💍"}</div>
+      <div class="nm"><b>${esc(p.code)}</b> ${esc(p.name)}<small>${p.qty} in stock in total</small></div>
+      <div class="btns">
+        <button type="button" class="minus" data-act="out" aria-label="Stock out from here">−</button>
+        <span class="here" title="Pieces here">${here(p)}</span>
+        <button type="button" class="plus" data-act="in" aria-label="Stock in here">+</button>
+        <button type="button" class="ghost" data-act="move" aria-label="Move from here">⇄</button>
+      </div>
+    </div>`).join("") || '<p class="muted">Nothing here yet.</p>';
+  $("#put-here").hidden = none;
+  $("#btn-place-label").hidden = none;
+  if (!none) {
+    $("#put-item").innerHTML = '<option value="">Put an item here…</option>' + [...state.products]
+      .filter((p) => p.qty > here(p))
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((p) => `<option value="${p.id}">${esc(p.code)} · ${esc(p.name)}</option>`).join("");
+  }
+}
+
+function placeItemAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const p = state.products.find((x) => x.id === Number(btn.closest(".pi-row").dataset.id));
+  const placeVal = state.openPlaceId === "none" ? "" : String(state.openPlaceId);
+  if (btn.dataset.act === "move") openMove(p, placeVal);
+  else openStock(p, btn.dataset.act, placeVal);
+}
+
+function putHere() {
+  const p = state.products.find((x) => x.id === Number($("#put-item").value));
+  if (!p) return toast("Choose an item first");
+  openMove(p, null, String(state.openPlaceId));
+}
+
+// ----- move -----
+function openMove(product, fromId = null, toId = null) {
+  state.move = { product };
+  const form = $("#form-move");
+  form.reset();
+  $("#move-error").hidden = true;
+  $("#move-title").textContent = "⇄ Move " + product.name;
+  $("#move-sub").textContent = `${product.code} · ${product.qty} in stock`;
+  let from = fromId != null ? fromId : biggestPlace(product);
+  if (toId != null && String(from) === String(toId)) {
+    from = [...product.locations.map((l) => String(l.id)), ...(product.unassigned ? [""] : [])].find((v) => v !== String(toId)) ?? from;
+  }
+  fillPlaceSelect($("#move-from"), { mode: "out", product, selected: from });
+  fillMoveTo(toId);
+  $("#dlg-move").showModal();
+}
+
+function fillMoveTo(selected) {
+  const from = $("#move-from").value;
+  fillPlaceSelect($("#move-to"), { mode: "to", product: state.move.product, exclude: from,
+    selected: selected != null ? selected : $("#move-to").value });
+  const p = state.move.product;
+  const max = from === "" ? p.unassigned : ((p.locations.find((l) => String(l.id) === from) || {}).qty || 0);
+  $("#form-move").qty.max = max;
+  $("#form-move").qty.value = Math.min(Math.max(1, parseInt($("#form-move").qty.value, 10) || 1), max || 1);
+}
+
+async function saveMove(e) {
+  e.preventDefault();
+  const form = e.target, err = $("#move-error"), btn = form.querySelector("[type=submit]");
+  err.hidden = true;
+  if (form.to.value === "__new") return showError(err, new Error("Choose where to move it"));
+  btn.disabled = true;
+  try {
+    const p = await api(`products/${state.move.product.id}/move`, { method: "POST", body: {
+      from_location_id: form.from.value, to_location_id: form.to.value, qty: form.qty.value, note: form.note.value,
+    } });
+    $("#dlg-move").close();
+    toast(`Moved ${form.qty.value} × ${p.code}: ${placeName(form.from.value)} → ${placeName(form.to.value)}`, 3500);
+    await refresh();
+  } catch (e2) { showError(err, e2); }
+  finally { btn.disabled = false; }
+}
+
+// ----- QR codes -----
+const itemLink = (p) => `${location.origin}/#item=${encodeURIComponent(p.code)}`;
+const placeLink = (l) => `${location.origin}/#place=${l.id}`;
+
+let qrLibPromise = null;
+const loadQrLib = () => qrLibPromise || (qrLibPromise = loadScript("/vendor/qrcode.js").catch((e) => { qrLibPromise = null; throw e; }));
+
+function qrSvg(text) {
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  return qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+}
+
+// kind "places": list of places; kind "items": list of products
+async function printLabels(kind, list) {
+  if (!list.length) return toast("Nothing to print", 3000);
+  try { await loadQrLib(); } catch (err) { return toast(err.message, 4000); }
+  const html = list.map((x) => kind === "places"
+    ? `<div class="lbl place">${qrSvg(placeLink(x))}<div class="t">${esc(x.name)}<small>📍 Scan to see what should be here</small></div></div>`
+    : `<div class="lbl tag">${qrSvg(itemLink(x))}<div class="t"><span class="c">${esc(x.code)}</span><span class="n">${esc(x.name)}</span><span class="k">${esc([x.category, [x.metal, x.purity].filter(Boolean).join(" "), x.weight_g != null ? fmtNum(x.weight_g, 3) + " g" : ""].filter(Boolean).join(" · "))}</span></div></div>`
+  ).join("");
+  $("#print-area").innerHTML = `<div class="lbl-sheet">${html}</div>`;
+  document.querySelectorAll("dialog[open]").forEach((d) => d.close());
+  setTimeout(() => window.print(), 100);
+}
+
+function openLabels() {
+  const sel = $("#labels-which");
+  sel.innerHTML = [["all", `All items (${state.products.length})`],
+    ...state.categories.map((c) => ["cat:" + c.id, `Category: ${c.name} (${c.items})`]),
+    ...state.locations.map((l) => ["place:" + l.id, `Place: ${l.name} (${l.items})`])]
+    .map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+  updateLabelsForm();
+  $("#dlg-labels").showModal();
+}
+
+function labelsSelection() {
+  const form = $("#form-labels");
+  if (form.kind.value === "places") return state.locations;
+  const w = form.which.value;
+  return state.products.filter((p) => w === "all" ? true
+    : w.startsWith("cat:") ? p.category_id === Number(w.slice(4))
+    : p.locations.some((l) => l.id === Number(w.slice(6))))
+    .sort((a, b) => a.code.localeCompare(b.code));
+}
+
+function updateLabelsForm() {
+  const form = $("#form-labels");
+  $("#labels-which-wrap").hidden = form.kind.value !== "items";
+  const n = labelsSelection().length;
+  $("#labels-count").textContent = form.kind.value === "places"
+    ? (n ? `${n} place label${n === 1 ? "" : "s"} (about 8 per A4 page).` : "No places yet. Add them under 📍 Places first.")
+    : `${n} item tag${n === 1 ? "" : "s"} (about 30 per A4 page).`;
+}
+
+// ----- scanner -----
+let scanStream = null, scanTimer = null, jsqrPromise = null;
+
+async function openScan() {
+  $("#scan-status").textContent = "Starting camera…";
+  $(".scan-view").classList.remove("found");
+  $("#form-code").reset();
+  $("#dlg-scan").showModal();
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("This browser can't use the camera here. Use your phone's camera app to scan the label instead, or type the code below.");
+    jsqrPromise = jsqrPromise || loadScript("/vendor/jsQR.js").catch((e) => { jsqrPromise = null; throw e; });
+    [scanStream] = await Promise.all([
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false }),
+      jsqrPromise,
+    ]);
+    if (!$("#dlg-scan").open) return stopScan();
+    const video = $("#scan-video");
+    video.srcObject = scanStream;
+    await video.play();
+    $("#scan-status").textContent = "Point the camera at a QR label.";
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    scanTimer = setInterval(() => {
+      if (!video.videoWidth) return;
+      const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+      canvas.width = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const hit = window.jsQR(img.data, img.width, img.height, { inversionAttempts: "attemptBoth" });
+      if (hit && hit.data) onScanned(hit.data);
+    }, 200);
+  } catch (err) {
+    $("#scan-status").textContent = err.name === "NotAllowedError"
+      ? "Camera permission was refused. Allow camera access for this site in your browser settings, or type the code below."
+      : err.message;
+  }
+}
+
+function stopScan() {
+  clearInterval(scanTimer);
+  scanTimer = null;
+  if (scanStream) scanStream.getTracks().forEach((t) => t.stop());
+  scanStream = null;
+}
+
+function onScanned(text) {
+  const target = parseTarget(text);
+  if (!target) { $("#scan-status").textContent = "That QR code isn't one of this app's labels."; return; }
+  $(".scan-view").classList.add("found");
+  try { navigator.vibrate && navigator.vibrate(80); } catch {}
+  stopScan();
+  $("#dlg-scan").close();
+  goTo(target);
+}
+
+// Understands this app's label links (…/#item=RIN-0001, …/#place=3) or a bare item code.
+function parseTarget(text) {
+  const t = String(text || "").trim();
+  const m = /#(item|place)=([^&\s]+)/.exec(t);
+  if (m) return { type: m[1], value: decodeURIComponent(m[2]) };
+  if (/^[A-Za-z]{2,}\d*-\d{1,}$/.test(t)) return { type: "item", value: t.toUpperCase() };
+  return null;
+}
+
+function goTo(target) {
+  if (target.type === "place") {
+    const id = Number(target.value);
+    if (!state.locations.some((l) => l.id === id)) return toast("That place doesn't exist any more", 4000);
+    openPlace(id);
+  } else {
+    const p = state.products.find((x) => x.code.toUpperCase() === target.value.toUpperCase());
+    if (!p) return toast(`No item with code ${target.value}`, 4000);
+    showItem(p);
+    const where = [...p.locations.map((l) => `${l.name} ×${l.qty}`), ...(p.unassigned ? [`place not set ×${p.unassigned}`] : [])];
+    toast(`${p.code}: ${where.length ? "📍 " + where.join(", ") : "none in stock"}`, 5000);
+  }
+}
+
+// Labels scanned with the phone's own camera open the app at /#item=… or /#place=…
+function handleHash() {
+  const target = parseTarget(location.hash);
+  if (!target) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  goTo(target);
 }
 
 // ---------- search by photo ----------
@@ -991,12 +1388,14 @@ async function catAction(e) {
 
 // ---------- CSV export ----------
 function exportCsv() {
-  const cols = ["code", "name", "category", "metal", "purity", "colour", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "qty", "low_stock", "notes", "created_by", "created_at", "updated_at"];
+  const cols = ["code", "name", "category", "metal", "purity", "colour", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "qty", "places", "low_stock", "notes", "created_by", "created_at", "updated_at"];
   const cell = (v) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const lines = [cols.join(","), ...state.products.map((p) => cols.map((c) => cell(p[c])).join(","))];
+  const placesText = (p) => [...p.locations.map((l) => `${l.name} x${l.qty}`),
+    ...(p.unassigned ? [`Place not set x${p.unassigned}`] : [])].join("; ");
+  const lines = [cols.join(","), ...state.products.map((p) => cols.map((c) => cell(c === "places" ? placesText(p) : p[c])).join(","))];
   const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1008,14 +1407,52 @@ function exportCsv() {
 // ---------- wiring ----------
 function wire() {
   $("#btn-add").onclick = () => openItem();
-  $("#btn-categories").onclick = () => { $("#cat-error").hidden = true; $("#dlg-cats").showModal(); };
-  $("#btn-activity").onclick = () => openHistory(null);
-  $("#btn-export").onclick = exportCsv;
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
   $("#photo-input").onchange = pickPhoto;
   $("#btn-alerts").onclick = openAlerts;
   $("#btn-photo-search").onclick = openPhotoSearch;
+  $("#btn-places").onclick = () => { $("#place-error").hidden = true; renderPlaceList(); $("#dlg-places").showModal(); };
+  $("#form-place").onsubmit = addPlace;
+  $("#place-list").onclick = placeListAction;
+  $("#place-items").onclick = placeItemAction;
+  $("#btn-put-here").onclick = putHere;
+  $("#btn-place-label").onclick = () => printLabels("places", state.locations.filter((l) => l.id === Number(state.openPlaceId)));
+  $("#btn-print-places").onclick = () => printLabels("places", state.locations);
+  $("#form-move").onsubmit = saveMove;
+  $("#move-from").addEventListener("change", () => fillMoveTo(null));
+  $("#form-move").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-step]");
+    if (!b) return;
+    const input = $("#form-move").qty;
+    input.value = Math.min(Number(input.max) || Infinity, Math.max(1, (parseInt(input.value, 10) || 0) + Number(b.dataset.step)));
+  });
+  for (const id of ["#stock-place", "#item-place", "#move-to"]) $(id).addEventListener("change", onPlaceSelectChange);
+  $("#place-filter").onchange = (e) => { state.placeFilter = e.target.value; render(); };
+  $("#btn-scan").onclick = openScan;
+  $("#dlg-scan").addEventListener("close", stopScan);
+  $("#form-code").onsubmit = (e) => {
+    e.preventDefault();
+    const code = e.target.code.value.trim();
+    if (!code) return;
+    stopScan();
+    $("#dlg-scan").close();
+    goTo({ type: "item", value: code });
+  };
+  $("#btn-menu").onclick = () => $("#dlg-menu").showModal();
+  $("#dlg-menu").onclick = (e) => {
+    const b = e.target.closest("[data-menu]");
+    if (!b) return;
+    $("#dlg-menu").close();
+    const m = b.dataset.menu;
+    if (m === "activity") openHistory(null);
+    else if (m === "categories") { $("#cat-error").hidden = true; $("#dlg-cats").showModal(); }
+    else if (m === "labels") openLabels();
+    else if (m === "export") exportCsv();
+  };
+  $("#form-labels").addEventListener("change", updateLabelsForm);
+  $("#form-labels").onsubmit = (e) => { e.preventDefault(); printLabels($("#form-labels").kind.value, labelsSelection()); };
+  window.addEventListener("hashchange", handleHash);
   $("#ps-camera").onchange = runPhotoSearch;
   $("#ps-gallery").onchange = runPhotoSearch;
   $("#ps-results").onclick = photoMatchAction;
@@ -1085,12 +1522,14 @@ function wire() {
     if (act === "edit") openItem(p);
     else if (act === "history") openHistory(p);
     else if (act === "photo") openPhoto(p);
+    else if (act === "move") openMove(p);
+    else if (act === "label") printLabels("items", [p]);
     else openStock(p, act);
   };
 }
 
 wire();
-loadMe().then(refresh).then(() => { remindLowOnce(); startPolling(); }).catch((err) => {
+loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;
