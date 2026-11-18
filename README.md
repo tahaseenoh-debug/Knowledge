@@ -10,6 +10,10 @@ A simple stock app for jewellery that runs in the browser on phone or computer. 
 - **History**: every movement is logged per item, and **Activity** shows recent changes across all items.
 - **Photos**: take a picture with the phone camera or pick one from the gallery. It's shrunk automatically to about 100–250 KB and saved in the same free database, so there's nothing extra to set up. Tap a thumbnail to see it full size.
 - **Jewellery details**: metal, purity (22K / 18K / 925…), colour (shown with a small colour dot), weight in grams, stone, size, cost and selling price, supplier, notes.
+- **Same design in different colours**: add each colour as its own item (own code, stock, photo and low-stock alert), keeping the **same name** and putting the colour in **Colour**.
+  - **+ Colour** on an item (or **➕ Add another colour** in Edit) copies everything, so you just enter the new colour, stock and photo. It warns you if that colour already exists.
+  - Items with the same name in the same category show **"Also in: ● Rose gold ×2 · ● White gold ×0"**. Tap one to see all versions of the design together.
+  - This works for sizes too: versions without a colour are shown by size.
 - **📍 Places (locations)**: keep track of where pieces are (showroom cases, trays, safe, workshop, craftsman, branch…).
   - Places are saved once and reused, like categories.
   - Stock is counted **per place**: each item shows e.g. "📍 Case 1 ×3 · Safe ×2".

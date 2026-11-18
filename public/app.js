@@ -164,12 +164,37 @@ function updateBell() {
   $("#btn-alerts").title = n ? `${n} item(s) low on stock` : "No low-stock items";
 }
 
+// ---------- versions of the same design (colours, sizes) ----------
+// Items with the same name in the same category are treated as one design.
+const designKey = (p) => p.category_id + "|" + p.name.trim().toLowerCase().replace(/\s+/g, " ");
+function designGroups() {
+  const groups = new Map();
+  for (const p of state.products) {
+    const k = designKey(p);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(p);
+  }
+  return groups;
+}
+// What tells this version apart from its siblings: colour, else size, else code.
+const versionLabel = (v) => v.colour || (v.size ? "Size " + v.size : v.code);
+
+function variantsHtml(p, groups) {
+  const others = (groups.get(designKey(p)) || []).filter((v) => v.id !== p.id)
+    .sort((a, b) => versionLabel(a).localeCompare(versionLabel(b)));
+  if (!others.length) return "";
+  return `<div class="variants">Also in:${others.map((v) => `
+    <button type="button" data-act="variant" data-vid="${v.id}" class="${v.qty === 0 ? "zero" : ""}"
+      title="${esc(v.code)}">${v.colour ? colourHtml(v.colour) : esc(versionLabel(v))} ×<b>${v.qty}</b></button>`).join("")}</div>`;
+}
+
 function render() {
   updateBell();
   renderStats();
   const list = $("#list"), empty = $("#empty");
   const items = visibleProducts();
-  list.innerHTML = items.map(itemHtml).join("");
+  const groups = designGroups();
+  list.innerHTML = items.map((p) => itemHtml(p, groups)).join("");
   empty.hidden = items.length > 0;
   if (!state.products.length) {
     empty.innerHTML = state.categories.length
@@ -180,7 +205,7 @@ function render() {
   }
 }
 
-function itemHtml(p) {
+function itemHtml(p, groups = designGroups()) {
   const meta = [
     p.category,
     [p.metal, p.purity].filter(Boolean).join(" "),
@@ -201,10 +226,12 @@ function itemHtml(p) {
       <div class="head"><span class="code">${esc(p.code)}</span><span class="name">${esc(p.name)}</span>${badge}</div>
       <div class="meta">${meta}</div>
       ${placesHtml(p)}
+      ${variantsHtml(p, groups)}
       <div class="links">
         <button class="linkbtn" data-act="edit">Edit</button>
         <button class="linkbtn" data-act="history">History</button>
         ${p.qty > 0 && state.locations.length ? '<button class="linkbtn" data-act="move">Move</button>' : ""}
+        <button class="linkbtn" data-act="colour">+ Colour</button>
         ${p.track_pieces ? '<button class="linkbtn" data-act="pieces">Pieces</button>' : '<button class="linkbtn" data-act="label">QR tag</button>'}
       </div>
     </div>
@@ -284,6 +311,7 @@ function openItem(product = null) {
   $("#item-code").hidden = !product;
   $("#item-code").textContent = product ? "Code: " + product.code : "";
   $("#btn-delete-item").hidden = !product || !state.me.owner;
+  $("#btn-another-colour").hidden = !product;
   $("#opening-wrap").hidden = !!product;
   $("#opening-place-wrap").hidden = !!product || !state.locations.length;
   $("#item-track").checked = !!(product && product.track_pieces);
@@ -299,6 +327,40 @@ function openItem(product = null) {
   }
   $("#dlg-item").showModal();
   if (!product) form.name.focus();
+}
+
+// Opens "Add item" pre-filled from an existing item, so only the colour (and stock/photo) needs entering.
+function openAnotherColour(src) {
+  if ($("#dlg-item").open) $("#dlg-item").close();
+  openItem();
+  const form = $("#form-item");
+  for (const f of ["name", "metal", "purity", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "low_stock"]) {
+    form[f].value = src[f] ?? "";
+  }
+  renderCategorySelect(src.category_id);
+  $("#item-track").checked = !!src.track_pieces;
+  const taken = (designGroups().get(designKey(src)) || []).map((v) => v.colour).filter(Boolean);
+  $("#item-title").textContent = `Add another colour of ${src.name}`;
+  $("#item-code").hidden = false;
+  $("#item-code").textContent = taken.length ? `Already have: ${taken.join(", ")}` : `Copied from ${src.code}`;
+  form.colour.value = "";
+  form.colour.placeholder = "New colour, e.g. Rose gold";
+  form.colour.focus();
+}
+
+// Show every version of a design in the list (and highlight the one tapped).
+function showDesign(v) {
+  state.activeCat = null;
+  state.lowOnly = false;
+  state.placeFilter = "";
+  $("#low-only").checked = false;
+  $("#place-filter").value = "";
+  $("#search").value = v.name;
+  state.search = v.name;
+  renderChips();
+  render();
+  const el = document.querySelector(`.item[data-id="${v.id}"]`);
+  if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("flash"); }
 }
 
 async function newCategoryInline() {
@@ -317,6 +379,11 @@ async function saveItem(e) {
   const form = e.target;
   const body = Object.fromEntries(new FormData(form));
   body._isNew = !state.editing;
+  if (body._isNew && body.colour && body.colour.trim()) {
+    const twin = state.products.find((v) => designKey(v) === designKey({ name: body.name, category_id: Number(body.category_id) }) &&
+      (v.colour || "").trim().toLowerCase() === body.colour.trim().toLowerCase());
+    if (twin && !confirm(`${twin.code} is already "${twin.name}" in ${twin.colour}. Add a second item anyway?\n\n(To add more pieces of it, use + on ${twin.code} instead.)`)) return;
+  }
   const btn = form.querySelector("[type=submit]");
   btn.disabled = true;
   try {
@@ -1597,6 +1664,7 @@ function wire() {
   $("#btn-add").onclick = () => openItem();
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
+  $("#btn-another-colour").onclick = () => openAnotherColour(state.editing);
   $("#photo-input").onchange = pickPhoto;
   $("#btn-alerts").onclick = openAlerts;
   $("#btn-photo-search").onclick = openPhotoSearch;
@@ -1770,6 +1838,11 @@ function wire() {
     else if (act === "move") openMove(p);
     else if (act === "label") printLabels("items", [p]);
     else if (act === "pieces") openPieces(p);
+    else if (act === "colour") openAnotherColour(p);
+    else if (act === "variant") {
+      const v = state.products.find((x) => x.id === Number(btn.dataset.vid));
+      if (v) showDesign(v);
+    }
     else openStock(p, act);
   };
 }

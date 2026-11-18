@@ -332,7 +332,14 @@ button.thumb { cursor: zoom-in; }
 .item .code { font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--accent-soft); padding: 4px 7px; border-radius: 6px; letter-spacing: .5px; }
 .item .name { font-weight: 600; font-size: 16px; }
 .item .meta { color: var(--muted); font-size: 13px; margin-top: 3px; }
-.item .links { display: flex; gap: 12px; margin-top: 6px; }
+.item .links { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; }
+.item .variants { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 5px; font-size: 12px; color: var(--muted); }
+.item .variants button {
+  min-height: 26px; padding: 2px 9px; border-radius: 999px; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+}
+.item .variants button.zero { color: var(--out); }
+.item .variants button b { font-variant-numeric: tabular-nums; }
 .linkbtn { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent); cursor: pointer; font-size: 13px; }
 .badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); }
 .badge.out { background: var(--out-soft); color: var(--out); }
