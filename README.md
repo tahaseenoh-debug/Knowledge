@@ -2,6 +2,15 @@
 
 A simple stock app for jewellery that runs in the browser on phone or computer. It is hosted **free** on Cloudflare Pages, and the data is kept in Cloudflare D1, a free database, so everyone sees the same stock.
 
+## Use it as an app on your phone
+
+The site installs like a normal app. It gets an icon on the home screen, opens full screen without the browser bar, and has a bottom bar: **Stock · Scan · ＋ Add · Places · More**.
+
+- **iPhone:** open the link in **Safari** → tap **Share ⬆️** → **Add to Home Screen** → **Add**.
+- **Android:** open the link in **Chrome** → **☰ More → 📲 Install as an app** (or Chrome's **⋮** menu → **Install app**).
+
+It's the same app and the same data as on the computer, and updates arrive automatically. Stock is never stored on the phone; it always comes live from the server.
+
 ## What it does
 
 - **Categories**: you create each one once (Rings, Earrings, Bangles…) and it stays saved. You can add one straight from the "Add item" form, or rename and delete them under **Categories**.

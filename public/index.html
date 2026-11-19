@@ -2,9 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Jewellery Inventory</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💎</text></svg>">
+  <meta name="theme-color" content="#a47a2c">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/favicon-64.png" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Jewellery">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -24,8 +31,8 @@
     <section class="stats" id="stats"></section>
 
     <section class="filters">
-      <input type="search" id="search" placeholder="Search by name, code, metal, colour, stone…" autocomplete="off">
-      <button class="ghost photo-search-btn" id="btn-photo-search" type="button">📷 Search by photo</button>
+      <input type="search" id="search" placeholder="Search name, code, colour, stone…" autocomplete="off">
+      <button class="ghost photo-search-btn" id="btn-photo-search" type="button" aria-label="Search by photo">📷<span class="long"> Search by photo</span></button>
       <select id="place-filter" aria-label="Filter by place" class="place-filter"></select>
       <label class="check"><input type="checkbox" id="low-only"> Low stock only</label>
     </section>
@@ -34,6 +41,15 @@
     <div id="list" class="list"></div>
     <p id="empty" class="empty" hidden></p>
   </main>
+
+  <!-- Bottom bar on phones -->
+  <nav class="tabbar" id="tabbar" aria-label="Main">
+    <button type="button" data-tab="home"><span aria-hidden="true">🏠</span>Stock</button>
+    <button type="button" data-tab="scan"><span aria-hidden="true">📷</span>Scan</button>
+    <button type="button" data-tab="add" class="tab-add" aria-label="Add item"><span aria-hidden="true">＋</span>Add</button>
+    <button type="button" data-tab="places"><span aria-hidden="true">📍</span>Places</button>
+    <button type="button" data-tab="more"><span aria-hidden="true">☰</span>More</button>
+  </nav>
 
   <button class="sos-fab" id="btn-sos" type="button" aria-label="Emergency report">
     <span aria-hidden="true">🚨</span><b>Emergency</b><span class="sos-n" id="sos-n" hidden></span>
@@ -71,11 +87,21 @@
   <dialog id="dlg-menu" class="menu-dlg">
     <div class="dlg-body">
       <h2>More</h2>
+      <button type="button" class="menu-item install-item" data-menu="install" id="menu-install" hidden>📲 Install as an app on this phone</button>
       <button type="button" class="menu-item" data-menu="activity">🕘 Activity (stock history)</button>
       <button type="button" class="menu-item" data-menu="categories">🗂 Categories</button>
       <button type="button" class="menu-item" data-menu="labels">🖨 Print QR labels</button>
       <button type="button" class="menu-item" data-menu="export">⬇️ Export to Excel (CSV)</button>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- How to install on iPhone -->
+  <dialog id="dlg-install">
+    <div class="dlg-body">
+      <h2>📲 Install on this phone</h2>
+      <div id="install-steps"></div>
+      <div class="actions"><span class="spacer"></span><button type="button" class="primary" data-close>OK</button></div>
     </div>
   </dialog>
 

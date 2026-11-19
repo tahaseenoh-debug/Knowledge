@@ -660,6 +660,59 @@ function remindLowOnce() {
   if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
 }
 
+// ---------- phone app: bottom bar, install ----------
+// "Stock" tab: clear filters and go back to the top of the list.
+function goHome() {
+  state.search = ""; state.activeCat = null; state.lowOnly = false; state.placeFilter = "";
+  $("#search").value = ""; $("#low-only").checked = false; $("#place-filter").value = "";
+  renderChips();
+  render();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+const isInstalled = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+let installPrompt = null;
+
+function updateInstallItem() {
+  $("#menu-install").hidden = isInstalled() || !(installPrompt || isIOS() || /android/i.test(navigator.userAgent));
+}
+
+async function installApp() {
+  if (installPrompt) {
+    installPrompt.prompt();
+    const choice = await installPrompt.userChoice.catch(() => null);
+    installPrompt = null;
+    updateInstallItem();
+    if (choice && choice.outcome === "accepted") toast("📲 Installed! Open it from your home screen.", 4000);
+    return;
+  }
+  $("#install-steps").innerHTML = isIOS()
+    ? `<ol><li>Open this page in <b>Safari</b> (not Chrome or another app).</li>
+        <li>Tap the <b>Share</b> button <span aria-hidden="true">⬆️</span> at the bottom of the screen.</li>
+        <li>Scroll down and tap <b>Add to Home Screen</b>.</li>
+        <li>Tap <b>Add</b>. The 💎 <b>Jewellery</b> app appears on your home screen.</li></ol>`
+    : `<ol><li>Open this page in <b>Chrome</b>.</li>
+        <li>Tap the <b>⋮</b> menu at the top right.</li>
+        <li>Tap <b>Install app</b> (or <b>Add to Home screen</b>).</li>
+        <li>Tap <b>Install</b>. The 💎 <b>Jewellery</b> app appears on your home screen.</li></ol>`;
+  $("#dlg-install").showModal();
+}
+
+window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installPrompt = e; updateInstallItem(); });
+window.addEventListener("appinstalled", () => { installPrompt = null; updateInstallItem(); });
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+}
+
+// On a phone that hasn't installed it yet, mention it once.
+function suggestInstallOnce() {
+  if (isInstalled() || innerWidth > 700) return;
+  try { if (localStorage.getItem("install-hint")) return; localStorage.setItem("install-hint", "1"); } catch { return; }
+  setTimeout(() => toast("📲 Tip: install this as an app. Tap ☰ More → Install.", 6000), 5000);
+}
+
 // ---------- places ----------
 const placeName = (id) => id === "none" || id === "" || id == null
   ? "Place not set" : (state.locations.find((l) => l.id === Number(id)) || {}).name || "?";
@@ -1751,6 +1804,7 @@ function wire() {
     else if (m === "categories") { $("#cat-error").hidden = true; $("#dlg-cats").showModal(); }
     else if (m === "labels") openLabels();
     else if (m === "export") exportCsv();
+    else if (m === "install") installApp();
   };
   $("#form-labels").addEventListener("change", updateLabelsForm);
   $("#form-labels").onsubmit = async (e) => {
@@ -1766,6 +1820,17 @@ function wire() {
     } catch (err) { toast(err.message, 4000); }
   };
   window.addEventListener("hashchange", handleHash);
+  $("#tabbar").onclick = (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    const t = b.dataset.tab;
+    document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-alarm" && d.id !== "dlg-login" && d.close());
+    if (t === "home") goHome();
+    else if (t === "scan") openScan();
+    else if (t === "add") openItem();
+    else if (t === "places") $("#btn-places").click();
+    else if (t === "more") $("#btn-menu").click();
+  };
   $("#ps-camera").onchange = runPhotoSearch;
   $("#ps-gallery").onchange = runPhotoSearch;
   $("#ps-results").onclick = photoMatchAction;
@@ -1848,7 +1913,8 @@ function wire() {
 }
 
 wire();
-loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); }).catch((err) => {
+updateInstallItem();
+loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;
