@@ -232,6 +232,23 @@ function clean(v) {
   if (typeof v === "string") { const t = v.trim(); return t === "" ? null : t; }
   return v;
 }
+// Names: first letter of every word in capitals ("rose gold ring" -> "Rose Gold Ring").
+// Letters already typed in capitals are kept ("AD stone" -> "AD Stone").
+function titleCase(v) {
+  v = clean(v);
+  return v === null ? null : String(v).replace(/(^|[\s(\/])(\p{Ll})/gu, (m, sep, ch) => sep + ch.toUpperCase());
+}
+// Notes: only the first letter in capitals, like a sentence.
+function sentenceCase(v) {
+  v = clean(v);
+  return v === null ? null : String(v).replace(/^\p{Ll}/u, (ch) => ch.toUpperCase());
+}
+// Purity: all capitals ("22k" -> "22K").
+function upper(v) {
+  v = clean(v);
+  return v === null ? null : String(v).toUpperCase();
+}
+
 function num(v) {
   v = clean(v);
   if (v === null) return null;
@@ -260,18 +277,18 @@ async function uniquePrefix(db, wanted) {
 }
 
 function productValues(body) {
-  const name = clean(body.name);
+  const name = titleCase(body.name);
   if (!name) throw new HttpError(400, "Name is required");
   const category_id = int(body.category_id);
   if (!category_id) throw new HttpError(400, "Category is required");
   return {
     name, category_id,
-    metal: clean(body.metal), purity: clean(body.purity), colour: clean(body.colour),
-    weight_g: num(body.weight_g), stone: clean(body.stone), size: clean(body.size),
+    metal: titleCase(body.metal), purity: upper(body.purity), colour: titleCase(body.colour),
+    weight_g: num(body.weight_g), stone: titleCase(body.stone), size: clean(body.size),
     cost_price: num(body.cost_price), sell_price: num(body.sell_price),
-    supplier: clean(body.supplier),
+    supplier: titleCase(body.supplier),
     low_stock: Math.max(0, int(body.low_stock, 1)),
-    notes: clean(body.notes),
+    notes: sentenceCase(body.notes),
   };
 }
 
@@ -543,7 +560,7 @@ async function route(request, env, parts, user, waitUntil) {
       if (!type) throw new HttpError(400, "Choose what happened");
       const photos = (Array.isArray(body.photos) ? body.photos : []).map(parsePhoto);
       if (photos.length > MAX_INCIDENT_PHOTOS) throw new HttpError(400, `Up to ${MAX_INCIDENT_PHOTOS} photos per report`);
-      const note = clean(body.note);
+      const note = sentenceCase(body.note);
       if (!photos.length && !note) throw new HttpError(400, "Add a photo or a few words about what happened");
       const productId = int(body.product_id);
       const row = await db.prepare(
@@ -580,7 +597,7 @@ async function route(request, env, parts, user, waitUntil) {
       const body = await readBody(request);
       const r = await db.prepare(
         `UPDATE incidents SET status = 'resolved', resolved_by = ?, resolved_note = ?, resolved_at = datetime('now')
-         WHERE id = ? RETURNING id`).bind(by, clean(body.note), id).first();
+         WHERE id = ? RETURNING id`).bind(by, sentenceCase(body.note), id).first();
       if (!r) throw new HttpError(404, "Report not found");
       return json(await getIncident(db, id));
     }
@@ -621,7 +638,7 @@ async function route(request, env, parts, user, waitUntil) {
     }
     if (method === "POST" && id === null) {
       const body = await readBody(request);
-      const name = clean(body.name);
+      const name = titleCase(body.name);
       if (!name) throw new HttpError(400, "Place name is required");
       const existing = await db.prepare("SELECT id, name FROM locations WHERE name = ?").bind(name).first();
       if (existing) return json(existing);
@@ -629,7 +646,7 @@ async function route(request, env, parts, user, waitUntil) {
     }
     if (method === "PUT" && id !== null) {
       requireOwner(user, env, "rename places");
-      const name = clean((await readBody(request)).name);
+      const name = titleCase((await readBody(request)).name);
       if (!name) throw new HttpError(400, "Place name is required");
       const clash = await db.prepare("SELECT id FROM locations WHERE name = ? AND id != ?").bind(name, id).first();
       if (clash) throw new HttpError(409, "Another place already has that name");
@@ -661,7 +678,7 @@ async function route(request, env, parts, user, waitUntil) {
     }
     if (method === "POST" && id === null) {
       const body = await readBody(request);
-      const name = clean(body.name);
+      const name = titleCase(body.name);
       if (!name) throw new HttpError(400, "Category name is required");
       const existing = await db.prepare("SELECT * FROM categories WHERE name = ?").bind(name).first();
       if (existing) return json(existing); // already saved: just reuse it
@@ -674,7 +691,7 @@ async function route(request, env, parts, user, waitUntil) {
     if (method === "PUT" && id !== null) {
       requireOwner(user, env);
       const body = await readBody(request);
-      const name = clean(body.name);
+      const name = titleCase(body.name);
       if (!name) throw new HttpError(400, "Category name is required");
       const clash = await db.prepare("SELECT id FROM categories WHERE name = ? AND id != ?").bind(name, id).first();
       if (clash) throw new HttpError(409, "Another category already has that name");
@@ -783,7 +800,7 @@ async function route(request, env, parts, user, waitUntil) {
         const product = await getProduct(db, id);
         await db.prepare(
           "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, pieces) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-          .bind(id, change, product.qty, clean(body.reason), clean(body.note), by,
+          .bind(id, change, product.qty, clean(body.reason), sentenceCase(body.note), by,
             change > 0 ? (place && place.name) : placeNames(rows), serials.join(",")).run();
         const msg = telegramReady(env) && lowStockMessage(product, before.qty, change, clean(body.reason), by, url.origin);
         if (msg) waitUntil(sendTelegram(env, msg).catch((e) => console.error("Low-stock alert failed:", e.message)));
@@ -817,7 +834,7 @@ async function route(request, env, parts, user, waitUntil) {
       }
       await db.prepare(
         "INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(id, change, updated.qty, clean(body.reason), clean(body.note), by, place && place.name).run();
+        .bind(id, change, updated.qty, clean(body.reason), sentenceCase(body.note), by, place && place.name).run();
       const product = await getProduct(db, id);
       const oldQty = updated.qty - change;
       const msg = telegramReady(env) && lowStockMessage(product, oldQty, change, clean(body.reason), by, url.origin);
@@ -840,7 +857,7 @@ async function route(request, env, parts, user, waitUntil) {
         await db.prepare(
           `INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, to_location, moved, pieces)
            VALUES (?, 0, ?, 'Moved', ?, ?, ?, ?, ?, ?)`)
-          .bind(id, tp.qty, clean(body.note), by, placeNames(rows), to ? to.name : "Place not set", rows.length,
+          .bind(id, tp.qty, sentenceCase(body.note), by, placeNames(rows), to ? to.name : "Place not set", rows.length,
             rows.map((r) => r.serial).join(",")).run();
         return json({ ...(await getProduct(db, id)), moved: rows.length });
       }
@@ -862,7 +879,7 @@ async function route(request, env, parts, user, waitUntil) {
       await db.prepare(
         `INSERT INTO movements (product_id, change, qty_after, reason, note, by_user, location, to_location, moved)
          VALUES (?, 0, ?, 'Moved', ?, ?, ?, ?, ?)`)
-        .bind(id, p.qty, clean(body.note), by, from ? from.name : "Place not set", to ? to.name : "Place not set", n).run();
+        .bind(id, p.qty, sentenceCase(body.note), by, from ? from.name : "Place not set", to ? to.name : "Place not set", n).run();
       return json(await getProduct(db, id));
     }
     if (sub === "photo" && id !== null) {

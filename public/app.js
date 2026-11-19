@@ -660,6 +660,28 @@ function remindLowOnce() {
   if (n) toast(`⚠️ ${n} item${n > 1 ? "s are" : " is"} low on stock. Tap 🔔 to see.`, 4500);
 }
 
+// ---------- capital letters ----------
+// Same rules as the server: names get a capital at the start of every word, purity is all capitals,
+// notes start with a capital. Applied as soon as you leave a field, so you see it straight away.
+const titleCase = (v) => v.replace(/(^|[\s(\/])(\p{Ll})/gu, (m, sep, ch) => sep + ch.toUpperCase());
+const sentenceCase = (v) => v.replace(/^(\s*)(\p{Ll})/u, (m, sp, ch) => sp + ch.toUpperCase());
+const CASE_FIELDS = {
+  title: ["#form-item [name=name]", "#form-item [name=metal]", "#form-item [name=colour]", "#form-item [name=stone]",
+    "#form-item [name=supplier]", "#form-place [name=name]", "#form-cat [name=name]"],
+  upper: ["#form-item [name=purity]"],
+  sentence: ["#form-item [name=notes]", "#form-stock [name=note]", "#form-move [name=note]", "#form-report [name=note]"],
+};
+function setupCapitals() {
+  const keyboard = { title: "words", upper: "characters", sentence: "sentences" };
+  const fix = { title: titleCase, upper: (v) => v.toUpperCase(), sentence: sentenceCase };
+  for (const [kind, sels] of Object.entries(CASE_FIELDS)) {
+    for (const el of document.querySelectorAll(sels.join(","))) {
+      el.setAttribute("autocapitalize", keyboard[kind]); // phone keyboards start with capitals
+      el.addEventListener("change", () => { el.value = fix[kind](el.value); });
+    }
+  }
+}
+
 // ---------- phone app: bottom bar, install ----------
 // "Stock" tab: clear filters and go back to the top of the list.
 function goHome() {
@@ -1914,6 +1936,7 @@ function wire() {
 
 wire();
 updateInstallItem();
+setupCapitals();
 loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
