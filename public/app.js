@@ -232,6 +232,7 @@ function itemHtml(p, groups = designGroups()) {
         <button class="linkbtn" data-act="history">History</button>
         ${p.qty > 0 && state.locations.length ? '<button class="linkbtn" data-act="move">Move</button>' : ""}
         <button class="linkbtn" data-act="colour">+ Colour</button>
+        <button class="linkbtn" data-act="duplicate">Duplicate</button>
         ${p.track_pieces ? '<button class="linkbtn" data-act="pieces">Pieces</button>' : '<button class="linkbtn" data-act="label">QR tag</button>'}
       </div>
     </div>
@@ -311,7 +312,10 @@ function openItem(product = null) {
   $("#item-code").hidden = !product;
   $("#item-code").textContent = product ? "Code: " + product.code : "";
   $("#btn-delete-item").hidden = !product || !state.me.owner;
-  $("#btn-another-colour").hidden = !product;
+  $("#item-copy-row").hidden = !product;
+  state.copyMode = null;
+  $("#item-code").classList.remove("copy-note");
+  $("#form-item").colour.placeholder = "Yellow Gold, Rose Gold, Green…";
   $("#opening-wrap").hidden = !!product;
   $("#opening-place-wrap").hidden = !!product || !state.locations.length;
   $("#item-track").checked = !!(product && product.track_pieces);
@@ -329,22 +333,55 @@ function openItem(product = null) {
   if (!product) form.name.focus();
 }
 
-// Opens "Add item" pre-filled from an existing item, so only the colour (and stock/photo) needs entering.
-function openAnotherColour(src) {
+// Opens "Add item" pre-filled from an existing item.
+//  mode "colour":    everything except colour, notes and photo; asks for the new colour
+//  mode "duplicate": everything, including colour, notes and the photo; change what's different
+function openCopy(src, mode) {
   if ($("#dlg-item").open) $("#dlg-item").close();
   openItem();
+  state.copyMode = mode;
   const form = $("#form-item");
-  for (const f of ["name", "metal", "purity", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "low_stock"]) {
-    form[f].value = src[f] ?? "";
-  }
+  const fields = ["name", "metal", "purity", "weight_g", "stone", "size", "cost_price", "sell_price", "supplier", "low_stock"];
+  if (mode === "duplicate") fields.push("colour", "notes");
+  for (const f of fields) form[f].value = src[f] ?? "";
   renderCategorySelect(src.category_id);
   $("#item-track").checked = !!src.track_pieces;
+  $("#item-code").hidden = false;
+  $("#item-code").classList.add("copy-note");
+  if (mode === "duplicate") {
+    $("#item-title").textContent = `Duplicate ${src.code}`;
+    $("#item-code").textContent = `Copied from ${src.code} · ${src.name}. Change what's different, then Save. It gets its own new code.`;
+    if (src.photo_v) copyPhoto(src);
+    return;
+  }
+  openAnotherColourFinish(src, form);
+}
+
+// Copies the original's photo into the form (it can still be changed or removed).
+async function copyPhoto(src) {
+  try {
+    const blob = await (await fetch(photoUrl(src))).blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(blob);
+    });
+    if (state.copyMode !== "duplicate" || !$("#dlg-item").open || state.photo) return; // form changed meanwhile
+    state.photo = { dataUrl };
+    showPhotoPreview(dataUrl);
+  } catch {}
+}
+
+const openAnotherColour = (src) => openCopy(src, "colour");
+
+function openAnotherColourFinish(src, form) {
   const taken = (designGroups().get(designKey(src)) || []).map((v) => v.colour).filter(Boolean);
   $("#item-title").textContent = `Add another colour of ${src.name}`;
   $("#item-code").hidden = false;
   $("#item-code").textContent = taken.length ? `Already have: ${taken.join(", ")}` : `Copied from ${src.code}`;
   form.colour.value = "";
-  form.colour.placeholder = "New colour, e.g. Rose gold";
+  form.colour.placeholder = "New colour, e.g. Rose Gold";
   form.colour.focus();
 }
 
@@ -379,7 +416,7 @@ async function saveItem(e) {
   const form = e.target;
   const body = Object.fromEntries(new FormData(form));
   body._isNew = !state.editing;
-  if (body._isNew && body.colour && body.colour.trim()) {
+  if (body._isNew && state.copyMode === "colour" && body.colour && body.colour.trim()) {
     const twin = state.products.find((v) => designKey(v) === designKey({ name: body.name, category_id: Number(body.category_id) }) &&
       (v.colour || "").trim().toLowerCase() === body.colour.trim().toLowerCase());
     if (twin && !confirm(`${twin.code} is already "${twin.name}" in ${twin.colour}. Add a second item anyway?\n\n(To add more pieces of it, use + on ${twin.code} instead.)`)) return;
@@ -1740,6 +1777,7 @@ function wire() {
   $("#btn-new-cat").onclick = newCategoryInline;
   $("#btn-delete-item").onclick = deleteItem;
   $("#btn-another-colour").onclick = () => openAnotherColour(state.editing);
+  $("#btn-duplicate").onclick = () => openCopy(state.editing, "duplicate");
   $("#photo-input").onchange = pickPhoto;
   $("#btn-alerts").onclick = openAlerts;
   $("#btn-photo-search").onclick = openPhotoSearch;
@@ -1926,6 +1964,7 @@ function wire() {
     else if (act === "label") printLabels("items", [p]);
     else if (act === "pieces") openPieces(p);
     else if (act === "colour") openAnotherColour(p);
+    else if (act === "duplicate") openCopy(p, "duplicate");
     else if (act === "variant") {
       const v = state.products.find((x) => x.id === Number(btn.dataset.vid));
       if (v) showDesign(v);

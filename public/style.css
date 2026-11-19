@@ -209,6 +209,9 @@ main { padding-bottom: 96px; }
 .label-kind .check input { margin-top: 3px; }
 .mv .chg.move { color: var(--accent); background: var(--accent-soft); }
 #print-area { display: none; }
+.copy-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.copy-row button { flex: 1 1 140px; }
+.copy-note { margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--accent-soft); color: var(--text); font-size: 13px; }
 .track-opt { color: var(--text); font-size: 14px; white-space: normal; align-items: flex-start; gap: 10px; background: var(--accent-soft); padding: 10px 12px; border-radius: 10px; }
 .track-opt input { margin-top: 3px; flex: none; }
 .track-opt span { color: var(--muted); }
@@ -545,3 +548,4 @@ dialog form, .dlg-body { min-width: 0; }
 }
 .cat-list li { flex-wrap: wrap; }
 .cat-list .nm { min-width: 0; overflow-wrap: anywhere; }
+.code-line.copy-note { font: 500 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--text); letter-spacing: normal; }

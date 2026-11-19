@@ -19,6 +19,7 @@ It's the same app and the same data as on the computer, and updates arrive autom
 - **History**: every movement is logged per item, and **Activity** shows recent changes across all items.
 - **Photos**: take a picture with the phone camera or pick one from the gallery. It's shrunk automatically to about 100–250 KB and saved in the same free database, so there's nothing extra to set up. Tap a thumbnail to see it full size.
 - **Jewellery details**: metal, purity (22K / 18K / 925…), colour (shown with a small colour dot), weight in grams, stone, size, cost and selling price, supplier, notes.
+- **Duplicate**: on an item (or in **Edit → ⧉ Duplicate**), it copies *everything*, including colour, notes and photo, into a new item. Change only what's different (size, weight, price…) and save. It gets its own new code; stock starts at 0 unless you enter opening stock.
 - **Same design in different colours**: add each colour as its own item (own code, stock, photo and low-stock alert), keeping the **same name** and putting the colour in **Colour**.
   - **+ Colour** on an item (or **➕ Add another colour** in Edit) copies everything, so you just enter the new colour, stock and photo. It warns you if that colour already exists.
   - Items with the same name in the same category show **"Also in: ● Rose gold ×2 · ● White gold ×0"**. Tap one to see all versions of the design together.

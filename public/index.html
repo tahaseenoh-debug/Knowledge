@@ -348,10 +348,14 @@
           <span><b>Track each piece separately</b><br>Every piece gets its own number and QR tag (e.g. NEC-0001-03), so you know where each one is. Best for bigger or valuable pieces.</span></label>
         <label class="full">Notes<textarea name="notes" rows="2"></textarea></label>
       </div>
+      <div class="copy-row" id="item-copy-row" hidden>
+        <button type="button" class="ghost" id="btn-duplicate">⧉ Duplicate</button>
+        <button type="button" class="ghost" id="btn-another-colour">➕ Add another colour</button>
+      </div>
       <p class="error" id="item-error" hidden></p>
       <div class="actions">
         <button type="button" class="danger ghost" id="btn-delete-item" hidden>Delete</button>
-        <button type="button" class="ghost" id="btn-another-colour" hidden>➕ Add another colour</button>
+
         <span class="spacer"></span>
         <button type="button" class="ghost" data-close>Cancel</button>
         <button type="submit" class="primary">Save</button>
