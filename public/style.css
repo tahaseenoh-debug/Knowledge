@@ -523,3 +523,25 @@ label > input, label > select, label > textarea, label > .row, label > .stepper 
 @media (display-mode: standalone) {
   .topbar { padding-top: max(10px, env(safe-area-inset-top)); }
 }
+
+/* Long option text must wrap; grid cells must be allowed to shrink (otherwise forms get wider than the screen). */
+.check.track-opt { white-space: normal; display: flex; }
+.grid > * { min-width: 0; }
+dialog form, .dlg-body { min-width: 0; }
+
+@media (max-width: 700px) {
+  /* 16px stops iPhones zooming in when a field is tapped */
+  input, select, textarea { font-size: 16px; }
+  /* Save / Cancel stay visible at the bottom of long forms */
+  #dlg-item .actions, #dlg-stock .actions, #dlg-move .actions, #dlg-report .actions {
+    position: sticky; bottom: -16px; z-index: 1; margin: 0 -14px -16px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    background: var(--surface); border-top: 1px solid var(--line);
+  }
+  #dlg-item .actions .primary, #dlg-stock .actions .primary, #dlg-move .actions .primary { min-width: 96px; }
+}
+@media (max-width: 700px) {
+  label > input, label > select, label > textarea, .row > input, .row > select, .stepper input { font-size: 16px; }
+  .alarm-head { margin: -16px -14px 4px; }
+}
+.cat-list li { flex-wrap: wrap; }
+.cat-list .nm { min-width: 0; overflow-wrap: anywhere; }
