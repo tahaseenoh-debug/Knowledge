@@ -36,14 +36,6 @@ const fmtDate = (s) => {
 };
 
 // ---------- API ----------
-function getPassword() { try { return localStorage.getItem("inv-pw") || ""; } catch { return ""; } }
-function setPasswordCookie(p) {
-  // Lets <img> tags load photos when a password is set (they can't send headers).
-  document.cookie = `inv_pw=${encodeURIComponent(p)}; path=/; max-age=31536000; SameSite=Strict` +
-    (location.protocol === "https:" ? "; Secure" : "");
-}
-function setPassword(p) { try { localStorage.setItem("inv-pw", p); } catch {} setPasswordCookie(p); }
-if (getPassword()) setPasswordCookie(getPassword());
 const photoUrl = (p) => `/api/products/${p.id}/photo?v=${encodeURIComponent(p.photo_v)}`;
 
 function signedOut() {
@@ -59,7 +51,7 @@ async function api(path, opts = {}) {
   try {
     res = await fetch("/api/" + path, {
       method: opts.method || "GET",
-      headers: { "content-type": "application/json", "x-app-password": getPassword() },
+      headers: { "content-type": "application/json" },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
       redirect: "manual",
     });
@@ -71,31 +63,217 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await res.json(); } catch {}
   if (res.status === 401 && data && data.auth === "access") throw signedOut();
-  if (res.status === 401) { await askPassword(); return api(path, opts); }
+  if (res.status === 401 && data && (data.auth === "login" || data.auth === "setup") && !opts.noAuthRetry) {
+    await signIn(data.auth);
+    return api(path, opts);
+  }
   if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
   return data;
 }
 
-let passwordPrompt = null; // shared, so parallel requests wait for the same prompt
-function askPassword() {
-  if (!passwordPrompt) passwordPrompt = showPasswordPrompt().finally(() => { passwordPrompt = null; });
-  return passwordPrompt;
+// ---------- signing in (username + 6-digit PIN) ----------
+let signInPromise = null; // shared, so requests made at the same time wait for one sign-in
+function signIn(kind) {
+  if (!signInPromise) signInPromise = (kind === "setup" ? showSetup() : showLogin()).finally(() => { signInPromise = null; });
+  return signInPromise;
 }
 
-function showPasswordPrompt() {
+const blockCancel = (dlg) => dlg.addEventListener("cancel", (e) => e.preventDefault());
+
+// PIN boxes: digits only, at most 6
+document.addEventListener("input", (e) => {
+  if (e.target.classList && e.target.classList.contains("pin-input")) e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6);
+});
+
+function showLogin() {
   const dlg = $("#dlg-login"), form = $("#form-login"), err = $("#login-error");
   return new Promise((resolve) => {
-    if (getPassword()) { err.textContent = "That password didn't work."; err.hidden = false; }
     form.onsubmit = async (e) => {
       e.preventDefault();
-      setPassword(form.password.value);
-      const ok = await fetch("/api/ping", { headers: { "x-app-password": getPassword() } }).then((r) => r.ok).catch(() => false);
-      if (!ok) { err.textContent = "Wrong password."; err.hidden = false; return; }
-      err.hidden = true; form.reset(); dlg.close(); resolve();
+      err.hidden = true;
+      const btn = form.querySelector("[type=submit]");
+      btn.disabled = true;
+      try {
+        const res = await api("auth/login", { method: "POST", noAuthRetry: true,
+          body: { username: form.username.value.trim(), pin: form.pin.value } });
+        try { localStorage.setItem("last-username", form.username.value.trim()); } catch {}
+        form.pin.value = "";
+        dlg.close();
+        state.askPinChange = res.must_change_pin;
+        resolve();
+      } catch (e2) { showError(err, e2); form.pin.value = ""; form.pin.focus(); }
+      finally { btn.disabled = false; }
     };
-    dlg.addEventListener("cancel", (e) => e.preventDefault()); // can't dismiss
+    try { form.username.value = localStorage.getItem("last-username") || ""; } catch {}
+    dlg.showModal();
+    (form.username.value ? form.pin : form.username).focus();
+  });
+}
+
+async function showSetup() {
+  const dlg = $("#dlg-setup"), form = $("#form-setup"), err = $("#setup-error");
+  let status = {};
+  try { status = await (await fetch("/api/auth/status")).json(); } catch {}
+  if (!status.setup_needed) return showLogin();
+  $("#setup-pw-wrap").hidden = !status.needs_shop_password;
+  form.shop_password.required = !!status.needs_shop_password;
+  return new Promise((resolve) => {
+    form.name.addEventListener("change", () => {
+      if (!form.username.value) form.username.value = suggestUsername(form.name.value);
+    });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      try {
+        const res = await api("auth/setup", { method: "POST", noAuthRetry: true, body: {
+          shop_password: form.shop_password.value, name: form.name.value, username: form.username.value } });
+        try { localStorage.setItem("last-username", form.username.value.trim().toLowerCase()); } catch {}
+        dlg.close();
+        state.askPinChange = true;
+        await showPin({ title: "Your admin account is ready", who: `${res.name} · username: ${form.username.value.trim().toLowerCase()}`, pin: res.pin });
+        resolve();
+      } catch (e2) { showError(err, e2); }
+    };
     dlg.showModal();
   });
+}
+
+function suggestUsername(name) {
+  const first = String(name || "").trim().split(/\s+/)[0] || "";
+  return first.toLowerCase().normalize("NFD").replace(/[^a-z0-9]/g, "").slice(0, 20);
+}
+
+// Shows a new PIN once (after setup, creating an account or resetting a PIN). Resolves when closed.
+function showPin({ title, who, pin, share }) {
+  const dlg = $("#dlg-pin-show");
+  $("#pin-show-title").textContent = title;
+  $("#pin-show-who").textContent = who || "";
+  $("#pin-show-pin").textContent = pin;
+  const text = share || `PIN: ${pin}`;
+  $("#btn-pin-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { toast("Couldn't copy. Please write it down."); }
+  };
+  $("#btn-pin-share").hidden = !navigator.share;
+  $("#btn-pin-share").onclick = () => navigator.share({ text }).catch(() => {});
+  return new Promise((resolve) => {
+    dlg.addEventListener("close", () => resolve(), { once: true });
+    dlg.showModal();
+  });
+}
+
+function openMyPin(firstTime = false) {
+  const form = $("#form-mypin");
+  form.reset();
+  $("#mypin-error").hidden = true;
+  $("#mypin-intro").textContent = firstTime
+    ? "Please choose your own 6-digit PIN now (numbers only). Avoid easy ones like 111111 or 123456."
+    : "Choose a new 6-digit PIN (numbers only). Avoid easy ones like 111111 or 123456.";
+  $("#dlg-mypin").showModal();
+  form.current_pin.focus();
+}
+
+async function saveMyPin(e) {
+  e.preventDefault();
+  const form = e.target, err = $("#mypin-error");
+  err.hidden = true;
+  if (!/^\d{6}$/.test(form.new_pin.value)) return showError(err, new Error("The new PIN must be exactly 6 digits"));
+  if (form.new_pin.value !== form.new_pin2.value) return showError(err, new Error("The two new PINs don't match"));
+  try {
+    await api("auth/pin", { method: "POST", body: { current_pin: form.current_pin.value, new_pin: form.new_pin.value } });
+    $("#dlg-mypin").close();
+    state.me.must_change_pin = false;
+    toast("🔑 Your PIN has been changed", 3500);
+  } catch (e2) { showError(err, e2); }
+}
+
+async function logout() {
+  if (!confirm("Sign out on this phone?")) return;
+  try { await api("auth/logout", { method: "POST", noAuthRetry: true }); } catch {}
+  location.reload();
+}
+
+// ----- staff accounts (admins) -----
+async function openUsers() {
+  $("#user-error").hidden = true;
+  $("#form-user").reset();
+  $("#dlg-users").showModal();
+  await renderUsers();
+}
+
+async function renderUsers() {
+  try {
+    const users = await api("users");
+    $("#user-list").innerHTML = users.map((u) => {
+      const me = u.username === state.me.username;
+      const tags = [
+        `<span class="tag ${u.role === "admin" ? "admin" : ""}">${u.role === "admin" ? "Admin" : "Staff"}</span>`,
+        !u.active ? '<span class="tag bad">Switched off</span>' : "",
+        u.locked ? '<span class="tag bad">Locked (wrong PINs)</span>' : "",
+        u.active && u.must_change_pin ? '<span class="tag warn">Hasn\'t chosen own PIN yet</span>' : "",
+      ].join("");
+      return `<li class="${u.active ? "" : "off"}" data-id="${u.id}">
+        <div class="top"><b>${esc(u.name)}${me ? " (you)" : ""}</b><span class="un">@${esc(u.username)}</span>${tags}</div>
+        <div class="meta">${u.last_login ? "Last signed in " + esc(fmtDate(u.last_login)) : "Never signed in"}</div>
+        <div class="acts">
+          ${u.active ? '<button type="button" class="ghost" data-act="reset">🔑 New PIN</button>' : ""}
+          ${u.active ? `<button type="button" class="ghost" data-act="role">${u.role === "admin" ? "Make staff" : "Make admin"}</button>` : ""}
+          <button type="button" class="ghost" data-act="rename">Rename</button>
+          ${me ? "" : `<button type="button" class="ghost ${u.active ? "danger" : ""}" data-act="active">${u.active ? "Switch off" : "Switch on"}</button>`}
+        </div>
+      </li>`;
+    }).join("");
+    state.users = users;
+  } catch (err) { showError($("#user-error"), err); }
+}
+
+const appLink = () => location.origin + "/";
+
+async function createUser(e) {
+  e.preventDefault();
+  const form = e.target, err = $("#user-error");
+  err.hidden = true;
+  try {
+    const res = await api("users", { method: "POST", body: { name: form.name.value, username: form.username.value, role: form.role.value } });
+    form.reset();
+    await renderUsers();
+    await showPin({ title: `Account created for ${res.user.name}`,
+      who: `Username: ${res.user.username} · ${res.user.role === "admin" ? "Admin (full access)" : "Staff (no deleting)"}`, pin: res.pin,
+      share: `Jewellery Inventory\n${appLink()}\nUsername: ${res.user.username}\nPIN: ${res.pin}\n(You'll be asked to choose your own 6-digit PIN.)` });
+  } catch (e2) { showError(err, e2); }
+}
+
+async function userAction(e) {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const u = state.users.find((x) => x.id === Number(btn.closest("li").dataset.id));
+  const err = $("#user-error");
+  err.hidden = true;
+  try {
+    const act = btn.dataset.act;
+    if (act === "reset") {
+      if (!confirm(`Make a new PIN for ${u.name}? Their old PIN stops working and they're signed out on their phone.`)) return;
+      const res = await api(`users/${u.id}/reset-pin`, { method: "POST", body: {} });
+      await renderUsers();
+      await showPin({ title: `New PIN for ${u.name}`, who: `Username: ${u.username}`, pin: res.pin,
+        share: `Jewellery Inventory\n${appLink()}\nUsername: ${u.username}\nNew PIN: ${res.pin}` });
+      return;
+    }
+    if (act === "role") {
+      const role = u.role === "admin" ? "staff" : "admin";
+      if (!confirm(role === "admin" ? `Give ${u.name} full admin access (including deleting and managing accounts)?`
+        : `Change ${u.name} to staff (no deleting, no account management)?`)) return;
+      await api(`users/${u.id}`, { method: "PUT", body: { role } });
+    } else if (act === "rename") {
+      const name = prompt("Name:", u.name);
+      if (!name || name.trim() === u.name) return;
+      await api(`users/${u.id}`, { method: "PUT", body: { name } });
+    } else if (act === "active") {
+      if (u.active && !confirm(`Switch off ${u.name}'s account? They're signed out straight away and can't sign in. Their name stays in the history.`)) return;
+      await api(`users/${u.id}`, { method: "PUT", body: { active: !u.active } });
+    }
+    await renderUsers();
+    if (u.username === state.me.username) await loadMe();
+  } catch (e2) { showError(err, e2); }
 }
 
 function toast(msg, ms = 2200) {
@@ -1708,13 +1886,25 @@ async function reportAction(e) {
 
 async function loadMe() {
   try { state.me = await api("me"); } catch (err) { if (err.message.includes("signed out")) throw err; return; }
-  const box = $("#me");
-  if (state.me.signed_in) {
-    box.innerHTML = `<span>👤 <b>${esc(state.me.name)}</b></span>` +
-      (state.me.owner ? '<span class="role">Owner</span>' : '<span class="role">Staff</span>') +
-      '<a href="/cdn-cgi/access/logout">Sign out</a>';
-    box.title = state.me.email;
+  const me = state.me, box = $("#me");
+  if (me.signed_in) {
+    box.innerHTML = `<span>👤 <b>${esc(me.name)}</b></span>` +
+      `<span class="role">${me.owner ? "Admin" : "Staff"}</span>` +
+      (me.accounts ? '<button type="button" class="me-btn" id="me-logout">Sign out</button>' : '<a href="/cdn-cgi/access/logout">Sign out</a>');
+    box.title = me.email || (me.username ? "@" + me.username : "");
     box.hidden = false;
+    const lo = $("#me-logout");
+    if (lo) lo.onclick = logout;
+  }
+  $("#menu-users").hidden = !(me.accounts && me.owner);
+  $("#menu-mypin").hidden = !(me.accounts && me.signed_in);
+  $("#menu-logout").hidden = !(me.accounts && me.signed_in);
+  let asked = false;
+  try { asked = !!sessionStorage.getItem("pin-asked"); } catch {}
+  if (me.accounts && me.must_change_pin && (state.askPinChange || !asked)) {
+    try { sessionStorage.setItem("pin-asked", "1"); } catch {}
+    state.askPinChange = false;
+    setTimeout(() => openMyPin(true), 600);
   }
 }
 
@@ -1865,6 +2055,9 @@ function wire() {
     else if (m === "labels") openLabels();
     else if (m === "export") exportCsv();
     else if (m === "install") installApp();
+    else if (m === "users") openUsers();
+    else if (m === "mypin") openMyPin();
+    else if (m === "logout") logout();
   };
   $("#form-labels").addEventListener("change", updateLabelsForm);
   $("#form-labels").onsubmit = async (e) => {
@@ -1880,11 +2073,21 @@ function wire() {
     } catch (err) { toast(err.message, 4000); }
   };
   window.addEventListener("hashchange", handleHash);
+  $("#form-mypin").onsubmit = saveMyPin;
+  $("#form-user").onsubmit = createUser;
+  $("#user-list").onclick = userAction;
+  $("#form-user").name.addEventListener("change", (e) => {
+    const f = $("#form-user");
+    if (!f.username.value) f.username.value = suggestUsername(e.target.value);
+  });
+  blockCancel($("#dlg-login"));
+  blockCancel($("#dlg-setup"));
   $("#tabbar").onclick = (e) => {
     const b = e.target.closest("[data-tab]");
     if (!b) return;
     const t = b.dataset.tab;
-    document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-alarm" && d.id !== "dlg-login" && d.close());
+    if ($("#dlg-login").open || $("#dlg-setup").open) return;
+    document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-alarm" && d.close());
     if (t === "home") goHome();
     else if (t === "scan") openScan();
     else if (t === "add") openItem();

@@ -92,6 +92,9 @@
       <button type="button" class="menu-item" data-menu="categories">🗂 Categories</button>
       <button type="button" class="menu-item" data-menu="labels">🖨 Print QR labels</button>
       <button type="button" class="menu-item" data-menu="export">⬇️ Export to Excel (CSV)</button>
+      <button type="button" class="menu-item" data-menu="users" id="menu-users" hidden>👥 Staff accounts</button>
+      <button type="button" class="menu-item" data-menu="mypin" id="menu-mypin" hidden>🔑 Change my PIN</button>
+      <button type="button" class="menu-item" data-menu="logout" id="menu-logout" hidden>🚪 Sign out</button>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
     </div>
   </dialog>
@@ -445,14 +448,82 @@
     </div>
   </dialog>
 
-  <!-- Password -->
-  <dialog id="dlg-login">
+  <!-- Sign in -->
+  <dialog id="dlg-login" class="auth-dlg">
     <form id="form-login" method="dialog">
-      <h2>Enter password</h2>
-      <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <div class="auth-logo" aria-hidden="true">💎</div>
+      <h2>Sign in</h2>
+      <label>Username<input name="username" required autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. ayesha"></label>
+      <label>6-digit PIN<input name="pin" class="pin-input" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="current-password" placeholder="••••••"></label>
       <p class="error" id="login-error" hidden></p>
-      <div class="actions"><span class="spacer"></span><button class="primary" type="submit">Unlock</button></div>
+      <button class="primary big-btn" type="submit">Sign in</button>
+      <p class="muted center">Forgot your PIN? Ask an admin to reset it.</p>
     </form>
+  </dialog>
+
+  <!-- First-time setup -->
+  <dialog id="dlg-setup" class="auth-dlg">
+    <form id="form-setup" method="dialog">
+      <div class="auth-logo" aria-hidden="true">💎</div>
+      <h2>Welcome! Create the admin account</h2>
+      <p class="muted">This is done once. You'll then add your staff under ☰ More → Staff accounts.</p>
+      <label id="setup-pw-wrap">Shop password <small>(the APP_PASSWORD set in Cloudflare)</small>
+        <input name="shop_password" type="password" autocomplete="off"></label>
+      <label>Your name<input name="name" required autocapitalize="words" placeholder="e.g. Tahira Begum"></label>
+      <label>Username (for signing in)<input name="username" required autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. tahira"></label>
+      <p class="error" id="setup-error" hidden></p>
+      <button class="primary big-btn" type="submit">Create admin account</button>
+    </form>
+  </dialog>
+
+  <!-- A newly generated PIN (shown once) -->
+  <dialog id="dlg-pin-show" class="auth-dlg">
+    <div class="dlg-body">
+      <h2 id="pin-show-title">Your PIN</h2>
+      <p class="muted" id="pin-show-who"></p>
+      <div class="pin-big" id="pin-show-pin"></div>
+      <p class="pin-warn" id="pin-show-note">Write it down or share it now. It won't be shown again.</p>
+      <div class="row wrap">
+        <button type="button" class="ghost" id="btn-pin-copy">📋 Copy</button>
+        <button type="button" class="ghost" id="btn-pin-share" hidden>📤 Share</button>
+        <span class="spacer"></span>
+        <button type="button" class="primary" data-close>Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Change own PIN -->
+  <dialog id="dlg-mypin">
+    <form id="form-mypin" method="dialog">
+      <h2>🔑 Change my PIN</h2>
+      <p class="muted" id="mypin-intro">Choose your own 6-digit PIN (numbers only). Avoid easy ones like 111111 or 123456.</p>
+      <label>Current PIN<input name="current_pin" class="pin-input" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="current-password"></label>
+      <label>New PIN<input name="new_pin" class="pin-input" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password"></label>
+      <label>New PIN again<input name="new_pin2" class="pin-input" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password"></label>
+      <p class="error" id="mypin-error" hidden></p>
+      <div class="actions">
+        <span class="spacer"></span>
+        <button type="button" class="ghost" data-close id="btn-mypin-later">Later</button>
+        <button type="submit" class="primary">Save PIN</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Staff accounts (admins) -->
+  <dialog id="dlg-users">
+    <div class="dlg-body">
+      <h2>👥 Staff accounts</h2>
+      <p class="muted"><b>Admin</b>: everything, including deleting and managing accounts. <b>Staff</b>: add, edit, stock in/out, move, reports, but no deleting.</p>
+      <form id="form-user" class="user-form">
+        <input name="name" placeholder="Name, e.g. Ayesha Khan" required autocapitalize="words">
+        <input name="username" placeholder="Username, e.g. ayesha" required autocapitalize="none" autocorrect="off" spellcheck="false">
+        <select name="role" aria-label="Access"><option value="staff">Staff: no deleting</option><option value="admin">Admin: full access</option></select>
+        <button class="primary" type="submit">Create account</button>
+      </form>
+      <p class="error" id="user-error" hidden></p>
+      <ul id="user-list" class="user-list"></ul>
+      <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
+    </div>
   </dialog>
 
   <datalist id="metals">

@@ -126,3 +126,28 @@ CREATE TABLE IF NOT EXISTS pieces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pieces_product ON pieces(product_id, status);
+
+-- Staff accounts: sign in with a username and a 6-digit PIN (stored only as a salted hash).
+CREATE TABLE IF NOT EXISTS users (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  name            TEXT NOT NULL,
+  username        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  role            TEXT NOT NULL DEFAULT 'staff',   -- admin (everything) | staff (no deleting, no account management)
+  pin_hash        TEXT NOT NULL,
+  pin_salt        TEXT NOT NULL,
+  must_change_pin INTEGER NOT NULL DEFAULT 1,      -- asked to choose their own PIN after a generated one
+  active          INTEGER NOT NULL DEFAULT 1,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until    TEXT,                            -- 5 wrong PINs -> locked for 15 minutes
+  last_login      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (              -- signed-in phones (60 days)
+  token_hash TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);

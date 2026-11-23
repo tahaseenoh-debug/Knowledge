@@ -11,6 +11,20 @@ The site installs like a normal app. It gets an icon on the home screen, opens f
 
 It's the same app and the same data as on the computer, and updates arrive automatically. Stock is never stored on the phone; it always comes live from the server.
 
+## Staff accounts (username + 6-digit PIN)
+
+Everyone signs in with **their own username and a 6-digit PIN**.
+
+- **First time after this update:** open the app and create the **admin account**. It asks for the **shop password** (the `APP_PASSWORD` secret set in Cloudflare), so only the owner can do this. The app then shows your PIN and asks you to choose your own.
+- **Adding staff:** ☰ More → **👥 Staff accounts** → enter name, username and access level → **Create account**. A random 6-digit PIN is shown once: copy or share it with the person. When they first sign in, they're asked to choose their own 6-digit PIN.
+- **Access levels:**
+  - **Admin**: everything, including deleting items, categories, places and reports, managing accounts and Telegram settings.
+  - **Staff**: add and edit items, stock in/out, moves, photos, emergency reports, but **no deleting**.
+- **Forgot PIN / account locked:** after 5 wrong PINs an account is locked for 15 minutes. An admin can tap **🔑 New PIN** to give a fresh PIN (this also unlocks it).
+- **Someone leaves:** tap **Switch off**. They're signed out at once and can't sign in; their name stays in the history.
+- **Change my PIN:** ☰ More → **🔑 Change my PIN** (exactly 6 digits; easy ones like 111111 or 123456 aren't allowed).
+- Phones stay signed in for 60 days. PINs are stored only in scrambled (hashed) form.
+
 ## What it does
 
 - **Categories**: you create each one once (Rings, Earrings, Bangles…) and it stays saved. You can add one straight from the "Add item" form, or rename and delete them under **Categories**.

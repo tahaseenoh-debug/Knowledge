@@ -15,6 +15,15 @@
 //   PUT    /products/:id/photo         {data: base64 JPEG}
 //   DELETE /products/:id/photo
 //   GET    /me                          (who is signed in)
+//   GET    /auth/status                 (sign-in mode, whether first setup is needed)
+//   POST   /auth/setup                  {shop_password?, name, username}  -> first admin + PIN
+//   POST   /auth/login                  {username, pin}
+//   POST   /auth/logout
+//   POST   /auth/pin                    {current_pin, new_pin}   (change own 6-digit PIN)
+//   GET    /users                       (admin)
+//   POST   /users                       {name, username, role}  -> new account + generated PIN (admin)
+//   PUT    /users/:id                   {name?, role?, active?} (admin)
+//   POST   /users/:id/reset-pin         -> new generated PIN (admin)
 //   GET    /locations                   (places + piece counts)
 //   POST   /locations                   {name}
 //   PUT    /locations/:id               {name}         (owner)
@@ -111,6 +120,25 @@ const SCHEMA = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')))`,
   `CREATE INDEX IF NOT EXISTS idx_pieces_product ON pieces(product_id, status)`,
+  `CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    role TEXT NOT NULL DEFAULT 'staff',
+    pin_hash TEXT NOT NULL,
+    pin_salt TEXT NOT NULL,
+    must_change_pin INTEGER NOT NULL DEFAULT 1,
+    active INTEGER NOT NULL DEFAULT 1,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    last_login TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
   `CREATE TABLE IF NOT EXISTS photo_vectors (
     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
     photo_v TEXT NOT NULL,
@@ -202,14 +230,220 @@ function displayName(email, env) {
   return local.replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// ---------- staff accounts with 6-digit PINs ----------
+// Roles: "admin" can do everything; "staff" can add, edit and do stock changes but can't delete
+// or manage accounts. PINs are stored only as salted PBKDF2 hashes. After 5 wrong PINs an account
+// is locked for 15 minutes. Signed-in phones get a session cookie (HttpOnly) valid for 60 days.
+const SESSION_DAYS = 60, MAX_TRIES = 5, LOCK_MINUTES = 15, PBKDF2_ROUNDS = 10000;
+const ROLES = ["admin", "staff"];
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const randomHex = (n) => hex(crypto.getRandomValues(new Uint8Array(n)));
+const sha256 = async (text) => hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+
+async function hashPin(pin, saltHex) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const salt = Uint8Array.from(saltHex.match(/../g), (h) => parseInt(h, 16));
+  return hex(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: PBKDF2_ROUNDS }, key, 256));
+}
+
+function sameText(a, b) { // compare without leaking where they differ
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+function weakPin(pin) {
+  if (/^(\d)\1{5}$/.test(pin)) return true;                       // 111111
+  const d = [...pin].map(Number);
+  const steps = d.slice(1).map((x, i) => x - d[i]);
+  return steps.every((x) => x === 1) || steps.every((x) => x === -1); // 123456, 654321
+}
+
+function newPin() {
+  for (;;) {
+    const n = crypto.getRandomValues(new Uint32Array(1))[0];
+    if (n >= 4_294_000_000) continue; // keep the 6 digits evenly random
+    const pin = String(n % 1_000_000).padStart(6, "0");
+    if (!weakPin(pin)) return pin;
+  }
+}
+
+function checkNewPin(pin) {
+  pin = String(pin || "");
+  if (!/^\d{6}$/.test(pin)) throw new HttpError(400, "The PIN must be exactly 6 digits (numbers only)");
+  if (weakPin(pin)) throw new HttpError(400, "That PIN is too easy to guess (like 111111 or 123456). Choose another.");
+  return pin;
+}
+
+async function pinFields(pin) {
+  const salt = randomHex(16);
+  return { pin_salt: salt, pin_hash: await hashPin(pin, salt) };
+}
+
+function cleanUsername(v) {
+  const u = String(v || "").trim().toLowerCase();
+  if (!/^[a-z0-9._-]{2,30}$/.test(u)) throw new HttpError(400, "Username: 2–30 letters or numbers, no spaces (e.g. ayesha)");
+  return u;
+}
+
+const userCount = async (db) => (await db.prepare("SELECT COUNT(*) AS n FROM users WHERE active = 1").first()).n;
+
+async function sessionUser(db, request) {
+  const token = cookie(request, "inv_session");
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
+  const u = await db.prepare(
+    `SELECT u.id, u.name, u.username, u.role, u.must_change_pin FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1`).bind(await sha256(token)).first();
+  return u || null;
+}
+
+async function startSession(db, userId, request) {
+  const token = randomHex(32);
+  await db.batch([
+    db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')"),
+    db.prepare(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
+      .bind(await sha256(token), userId),
+    db.prepare("UPDATE users SET last_login = datetime('now'), failed_attempts = 0, locked_until = NULL WHERE id = ?").bind(userId),
+  ]);
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `inv_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secure}`;
+}
+
+const publicUser = (u) => ({ id: u.id, name: u.name, username: u.username, role: u.role, active: !!u.active,
+  must_change_pin: !!u.must_change_pin, locked: !!(u.locked_until && u.locked_until > new Date().toISOString().replace("T", " ").slice(0, 19)),
+  last_login: u.last_login, created_at: u.created_at });
+
+const withCookie = (res, c) => { res.headers.append("set-cookie", c); return res; };
+
+// Sign-in routes: these work without being signed in.
+async function authRoute(request, env, sub, user) {
+  const db = env.DB;
+  const method = request.method;
+  if (sub === "status" && method === "GET") {
+    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) return json({ mode: "access", setup_needed: false, signed_in: true });
+    const n = await userCount(db);
+    return json({ mode: "accounts", setup_needed: n === 0, needs_shop_password: n === 0 && !!env.APP_PASSWORD,
+      signed_in: !!user, user: user && { name: user.name, username: user.username, role: user.role, must_change_pin: !!user.must_change_pin } });
+  }
+  if (sub === "setup" && method === "POST") {
+    const body = await readBody(request);
+    if (await userCount(db)) throw new HttpError(409, "Setup is already done. Sign in instead.");
+    if (env.APP_PASSWORD && body.shop_password !== env.APP_PASSWORD) throw new HttpError(403, "Wrong shop password");
+    const name = titleCase(body.name);
+    if (!name) throw new HttpError(400, "Enter your name");
+    const pin = newPin();
+    const f = await pinFields(pin);
+    const row = await db.prepare(
+      "INSERT INTO users (name, username, role, pin_hash, pin_salt, must_change_pin) VALUES (?, ?, 'admin', ?, ?, 1) RETURNING id")
+      .bind(name, cleanUsername(body.username), f.pin_hash, f.pin_salt).first();
+    return withCookie(json({ ok: true, pin, name }), await startSession(db, row.id, request));
+  }
+  if (sub === "login" && method === "POST") {
+    const body = await readBody(request);
+    const wrong = () => new HttpError(401, "Wrong username or PIN", { auth: "login" });
+    let username;
+    try { username = cleanUsername(body.username); } catch { throw wrong(); }
+    const u = await db.prepare("SELECT * FROM users WHERE username = ? AND active = 1").bind(username).first();
+    if (!u) throw wrong();
+    const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+    if (u.locked_until && u.locked_until > now) {
+      const mins = Math.max(1, Math.ceil((new Date(u.locked_until.replace(" ", "T") + "Z") - Date.now()) / 60000));
+      throw new HttpError(429, `Too many wrong PINs. Try again in ${mins} minute${mins > 1 ? "s" : ""}, or ask an admin to reset your PIN.`, { auth: "login" });
+    }
+    if (!sameText(await hashPin(String(body.pin || ""), u.pin_salt), u.pin_hash)) {
+      const tries = u.failed_attempts + 1;
+      if (tries >= MAX_TRIES) {
+        await db.prepare(`UPDATE users SET failed_attempts = 0, locked_until = datetime('now', '+${LOCK_MINUTES} minutes') WHERE id = ?`).bind(u.id).run();
+        throw new HttpError(429, `Too many wrong PINs. This account is locked for ${LOCK_MINUTES} minutes.`, { auth: "login" });
+      }
+      await db.prepare("UPDATE users SET failed_attempts = ? WHERE id = ?").bind(tries, u.id).run();
+      throw wrong();
+    }
+    return withCookie(json({ ok: true, name: u.name, role: u.role, must_change_pin: !!u.must_change_pin }),
+      await startSession(db, u.id, request));
+  }
+  if (sub === "logout" && method === "POST") {
+    const token = cookie(request, "inv_session");
+    if (token) await db.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await sha256(token)).run();
+    return withCookie(json({ ok: true }), "inv_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  }
+  if (sub === "pin" && method === "POST") {
+    if (!user) throw new HttpError(401, "Please sign in", { auth: "login" });
+    const body = await readBody(request);
+    const u = await db.prepare("SELECT * FROM users WHERE id = ?").bind(user.id).first();
+    if (!sameText(await hashPin(String(body.current_pin || ""), u.pin_salt), u.pin_hash)) throw new HttpError(400, "Your current PIN is not right");
+    const pin = checkNewPin(body.new_pin);
+    const f = await pinFields(pin);
+    await db.prepare("UPDATE users SET pin_hash = ?, pin_salt = ?, must_change_pin = 0 WHERE id = ?").bind(f.pin_hash, f.pin_salt, u.id).run();
+    return json({ ok: true });
+  }
+  throw new HttpError(404, "Not found");
+}
+
+// Account management (admins only).
+async function usersRoute(request, env, id, sub, user) {
+  const db = env.DB;
+  const method = request.method;
+  requireOwner(user, env, "manage staff accounts");
+  const adminsLeft = async (exceptId) => (await db.prepare(
+    "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1 AND id != ?").bind(exceptId).first()).n;
+  if (method === "GET" && id === null) {
+    const { results } = await db.prepare("SELECT * FROM users ORDER BY active DESC, name COLLATE NOCASE").all();
+    return json(results.map(publicUser));
+  }
+  if (method === "POST" && id === null) {
+    const body = await readBody(request);
+    const name = titleCase(body.name);
+    if (!name) throw new HttpError(400, "Enter the person's name");
+    const role = ROLES.includes(body.role) ? body.role : "staff";
+    const username = cleanUsername(body.username);
+    if (await db.prepare("SELECT 1 FROM users WHERE username = ?").bind(username).first()) {
+      throw new HttpError(409, `The username "${username}" is already taken. Choose another.`);
+    }
+    const pin = newPin();
+    const f = await pinFields(pin);
+    const row = await db.prepare(
+      "INSERT INTO users (name, username, role, pin_hash, pin_salt, must_change_pin) VALUES (?, ?, ?, ?, ?, 1) RETURNING *")
+      .bind(name, username, role, f.pin_hash, f.pin_salt).first();
+    return json({ user: publicUser(row), pin }, 201);
+  }
+  const target = id !== null && await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
+  if (!target) throw new HttpError(404, "Account not found");
+  if (method === "PUT" && !sub) {
+    const body = await readBody(request);
+    const name = body.name !== undefined ? titleCase(body.name) : target.name;
+    if (!name) throw new HttpError(400, "Enter the person's name");
+    const role = body.role !== undefined ? (ROLES.includes(body.role) ? body.role : target.role) : target.role;
+    const active = body.active !== undefined ? (body.active ? 1 : 0) : target.active;
+    const losingAdmin = target.role === "admin" && target.active && (role !== "admin" || !active);
+    if (losingAdmin && !(await adminsLeft(target.id))) throw new HttpError(409, "There must always be at least one active admin.");
+    await db.prepare("UPDATE users SET name = ?, role = ?, active = ? WHERE id = ?").bind(name, role, active, id).run();
+    if (!active) await db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run(); // signed out everywhere
+    return json(publicUser(await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first()));
+  }
+  if (method === "POST" && sub === "reset-pin") {
+    const pin = newPin();
+    const f = await pinFields(pin);
+    await db.batch([
+      db.prepare("UPDATE users SET pin_hash = ?, pin_salt = ?, must_change_pin = 1, failed_attempts = 0, locked_until = NULL WHERE id = ?")
+        .bind(f.pin_hash, f.pin_salt, id),
+      db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
+    ]);
+    return json({ pin, user: publicUser(await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first()) });
+  }
+  throw new HttpError(404, "Not found");
+}
+
 function isOwner(user, env) {
+  if (user && user.role) return user.role === "admin";   // built-in accounts
   const owners = String(env.OWNER_EMAILS || "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   if (!owners.length) return true;         // no owners listed: everyone can do everything
   return !!user && owners.includes(user.email);
 }
 
 function requireOwner(user, env, what = "delete") {
-  if (!isOwner(user, env)) throw new HttpError(403, `Only the owner can ${what}. Ask the owner to do this.`);
+  if (!isOwner(user, env)) throw new HttpError(403, `Only an admin can ${what}. Ask an admin to do this.`);
 }
 
 const PRODUCT_FIELDS = [
@@ -490,13 +724,17 @@ async function route(request, env, parts, user, waitUntil) {
   const [resource, idStr, sub] = parts;
   const id = idStr !== undefined ? Number(idStr) : null;
   if (idStr !== undefined && !Number.isInteger(id) && resource !== "notify" && resource !== "pieces") throw new HttpError(404, "Not found");
+  if (resource === "auth") return authRoute(request, env, idStr, user);
 
   // ---------- auth check endpoint ----------
   if (resource === "ping") return json({ ok: true });
+  if (resource === "users") return usersRoute(request, env, id, sub, user);
   if (resource === "me") {
     return json({
       signed_in: !!user, email: user && user.email, name: user && user.name,
+      username: user && user.username, role: user && user.role, must_change_pin: !!(user && user.must_change_pin),
       owner: isOwner(user, env), access: !!(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD),
+      accounts: !(env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD),
       telegram: telegramReady(env), telegram_token: !!env.TELEGRAM_BOT_TOKEN,
     });
   }
@@ -988,19 +1226,22 @@ function cookie(request, name) {
 export async function onRequest({ request, env, params, waitUntil }) {
   try {
     if (!env.DB) throw new HttpError(500, "Database not connected. Add a D1 binding named DB (see README).");
-    // Optional shared password: set APP_PASSWORD in the Pages project settings.
-    // The password comes in a header (API calls) or a cookie (so <img> tags can load photos).
-    if (env.APP_PASSWORD && request.headers.get("x-app-password") !== env.APP_PASSWORD &&
-        cookie(request, "inv_pw") !== env.APP_PASSWORD) {
-      throw new HttpError(401, "Wrong or missing password");
-    }
-    let user = null;
-    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
-      const email = await verifyAccess(request, env);
-      user = { email, name: displayName(email, env) };
-    }
     await ensureSchema(env.DB);
     const parts = Array.isArray(params.path) ? params.path : params.path ? [params.path] : [];
+    let user = null;
+    if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) {
+      // Sign-in handled by Cloudflare Access (see README).
+      const email = await verifyAccess(request, env);
+      user = { email, name: displayName(email, env) };
+    } else {
+      // Built-in staff accounts with 6-digit PINs.
+      user = await sessionUser(env.DB, request);
+      if (parts[0] === "auth") return await authRoute(request, env, parts[1], user);
+      if (!user) {
+        const setup = (await userCount(env.DB)) === 0;
+        throw new HttpError(401, setup ? "First-time setup needed" : "Please sign in", { auth: setup ? "setup" : "login" });
+      }
+    }
     return await route(request, env, parts, user, waitUntil);
   } catch (err) {
     if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status);
