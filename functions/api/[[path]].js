@@ -233,8 +233,9 @@ function displayName(email, env) {
 // ---------- staff accounts with 6-digit PINs ----------
 // Roles: "admin" can do everything; "staff" can add, edit and do stock changes but can't delete
 // or manage accounts. PINs are stored only as salted PBKDF2 hashes. After 5 wrong PINs an account
-// is locked for 15 minutes. Signed-in phones get a session cookie (HttpOnly) valid for 60 days.
-const SESSION_DAYS = 60, MAX_TRIES = 5, LOCK_MINUTES = 15, PBKDF2_ROUNDS = 10000;
+// is locked for 15 minutes. A sign-in lasts only while the app is in use: the session ends after
+// 30 minutes without activity (and the app itself asks for the PIN every time it's opened).
+const IDLE_MINUTES = 30, MAX_TRIES = 5, LOCK_MINUTES = 15, PBKDF2_ROUNDS = 10000;
 const ROLES = ["admin", "staff"];
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const randomHex = (n) => hex(crypto.getRandomValues(new Uint8Array(n)));
@@ -292,22 +293,27 @@ const userCount = async (db) => (await db.prepare("SELECT COUNT(*) AS n FROM use
 async function sessionUser(db, request) {
   const token = cookie(request, "inv_session");
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
+  const th = await sha256(token);
   const u = await db.prepare(
     `SELECT u.id, u.name, u.username, u.role, u.must_change_pin FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1`).bind(await sha256(token)).first();
-  return u || null;
+     WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1`).bind(th).first();
+  if (!u) return null;
+  // Still in use: push the idle time-out forward (at most once every 5 minutes, to save writes).
+  await db.prepare(`UPDATE sessions SET expires_at = datetime('now', '+${IDLE_MINUTES} minutes')
+    WHERE token_hash = ? AND expires_at < datetime('now', '+${IDLE_MINUTES - 5} minutes')`).bind(th).run();
+  return u;
 }
 
 async function startSession(db, userId, request) {
   const token = randomHex(32);
   await db.batch([
     db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')"),
-    db.prepare(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
+    db.prepare(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+${IDLE_MINUTES} minutes'))`)
       .bind(await sha256(token), userId),
     db.prepare("UPDATE users SET last_login = datetime('now'), failed_attempts = 0, locked_until = NULL WHERE id = ?").bind(userId),
   ]);
   const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `inv_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secure}`;
+  return `inv_session=${token}; Path=/; HttpOnly; SameSite=Lax${secure}`; // no Max-Age: gone when the browser closes
 }
 
 const publicUser = (u) => ({ id: u.id, name: u.name, username: u.username, role: u.role, active: !!u.active,

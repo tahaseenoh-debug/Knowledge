@@ -23,7 +23,8 @@ Everyone signs in with **their own username and a 6-digit PIN**.
 - **Forgot PIN / account locked:** after 5 wrong PINs an account is locked for 15 minutes. An admin can tap **🔑 New PIN** to give a fresh PIN (this also unlocks it).
 - **Someone leaves:** tap **Switch off**. They're signed out at once and can't sign in; their name stays in the history.
 - **Change my PIN:** ☰ More → **🔑 Change my PIN** (exactly 6 digits; easy ones like 111111 or 123456 aren't allowed).
-- Phones stay signed in for 60 days. PINs are stored only in scrambled (hashed) form.
+- **The PIN is asked every time the app is opened** (the username is remembered), and again if the app was in the background for more than 5 minutes. On the server, a sign-in also ends after 30 minutes without activity.
+- PINs are stored only in scrambled (hashed) form.
 
 ## What it does
 

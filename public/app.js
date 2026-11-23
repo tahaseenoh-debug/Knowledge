@@ -186,6 +186,28 @@ async function saveMyPin(e) {
   } catch (e2) { showError(err, e2); }
 }
 
+// ----- PIN every time -----
+// Opening the app always starts signed out, so the PIN is asked every time; the username is remembered.
+// Coming back after 5 minutes in the background (phone locked, another app) also asks again.
+const RELOCK_AFTER_MS = 5 * 60 * 1000;
+async function startSignedOut() {
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
+}
+
+async function lockApp() {
+  if ($("#dlg-login").open || $("#dlg-setup").open || !(state.me && state.me.accounts)) return;
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
+  document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-alarm" && d.close());
+  await signIn("login");
+  await loadMe();
+  await refresh();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") state.hiddenAt = Date.now();
+  else if (state.hiddenAt && Date.now() - state.hiddenAt > RELOCK_AFTER_MS) { state.hiddenAt = 0; lockApp(); }
+});
+
 async function logout() {
   if (!confirm("Sign out on this phone?")) return;
   try { await api("auth/logout", { method: "POST", noAuthRetry: true }); } catch {}
@@ -2179,7 +2201,7 @@ function wire() {
 wire();
 updateInstallItem();
 setupCapitals();
-loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
+startSignedOut().then(loadMe).then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;
