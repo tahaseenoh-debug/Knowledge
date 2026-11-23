@@ -23,7 +23,7 @@ Everyone signs in with **their own username and a 6-digit PIN**.
 - **Forgot PIN / account locked:** after 5 wrong PINs an account is locked for 15 minutes. An admin can tap **🔑 New PIN** to give a fresh PIN (this also unlocks it).
 - **Someone leaves:** tap **Switch off**. They're signed out at once and can't sign in; their name stays in the history.
 - **Change my PIN:** ☰ More → **🔑 Change my PIN** (exactly 6 digits; easy ones like 111111 or 123456 aren't allowed).
-- **The PIN is asked every time the app is opened** (the username is remembered), and again if the app was in the background for more than 5 minutes. On the server, a sign-in also ends after 30 minutes without activity.
+- **Signing in lasts 24 hours**, even if the app is closed and reopened. After 24 hours the PIN (or Face ID / fingerprint) is asked again. The username is remembered.
 - **Face ID / fingerprint:** after signing in with the PIN, the app offers to unlock with Face ID (iPhone) or fingerprint / face unlock (Android) next time. It can also be turned on or off in ☰ More. It's per person and per phone, and the PIN always keeps working. The face or fingerprint never leaves the phone: the phone holds a passkey and the server only checks its signature. When an admin gives someone a **New PIN**, their Face ID / fingerprint sign-in is switched off too (e.g. for a lost phone).
 - PINs are stored only in scrambled (hashed) form.
 

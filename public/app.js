@@ -139,9 +139,6 @@ async function showSetup() {
   $("#setup-pw-wrap").hidden = !status.needs_shop_password;
   form.shop_password.required = !!status.needs_shop_password;
   return new Promise((resolve) => {
-    form.name.addEventListener("change", () => {
-      if (!form.username.value) form.username.value = suggestUsername(form.name.value);
-    });
     form.onsubmit = async (e) => {
       e.preventDefault();
       err.hidden = true;
@@ -157,6 +154,12 @@ async function showSetup() {
     };
     dlg.showModal();
   });
+}
+
+// Fills the username from the name as it's typed, until the username is edited by hand.
+function linkUsername(nameEl, userEl) {
+  userEl.addEventListener("input", () => { userEl.dataset.edited = userEl.value ? "1" : ""; });
+  nameEl.addEventListener("input", () => { if (!userEl.dataset.edited) userEl.value = suggestUsername(nameEl.value); });
 }
 
 function suggestUsername(name) {
@@ -304,27 +307,9 @@ async function offerBio() {
   $("#dlg-bio-offer").showModal();
 }
 
-// ----- PIN every time -----
-// Opening the app always starts signed out, so the PIN is asked every time; the username is remembered.
-// Coming back after 5 minutes in the background (phone locked, another app) also asks again.
-const RELOCK_AFTER_MS = 5 * 60 * 1000;
-async function startSignedOut() {
-  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
-}
-
-async function lockApp() {
-  if ($("#dlg-login").open || $("#dlg-setup").open || !(state.me && state.me.accounts)) return;
-  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
-  document.querySelectorAll("dialog[open]").forEach((d) => d.id !== "dlg-alarm" && d.close());
-  await signIn("login");
-  await loadMe();
-  await refresh();
-}
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") state.hiddenAt = Date.now();
-  else if (state.hiddenAt && Date.now() - state.hiddenAt > RELOCK_AFTER_MS) { state.hiddenAt = 0; lockApp(); }
-});
+// ----- staying signed in -----
+// A sign-in lasts 24 hours (the server decides). After that, the next request gets "please sign in"
+// and the sign-in screen appears, with the Face ID / fingerprint button where it's turned on.
 
 async function logout() {
   if (!confirm("Sign out on this phone?")) return;
@@ -375,6 +360,7 @@ async function createUser(e) {
   try {
     const res = await api("users", { method: "POST", body: { name: form.name.value, username: form.username.value, role: form.role.value } });
     form.reset();
+    form.username.dataset.edited = "";
     await renderUsers();
     await showPin({ title: `Account created for ${res.user.name}`,
       who: `Username: ${res.user.username} · ${res.user.role === "admin" ? "Admin (full access)" : "Staff (no deleting)"}`, pin: res.pin,
@@ -2219,10 +2205,8 @@ function wire() {
   $("#form-mypin").onsubmit = saveMyPin;
   $("#form-user").onsubmit = createUser;
   $("#user-list").onclick = userAction;
-  $("#form-user").name.addEventListener("change", (e) => {
-    const f = $("#form-user");
-    if (!f.username.value) f.username.value = suggestUsername(e.target.value);
-  });
+  linkUsername($("#form-setup").name, $("#form-setup").username);
+  linkUsername($("#form-user").name, $("#form-user").username);
   blockCancel($("#dlg-login"));
   $("#btn-bio-no").onclick = () => {
     try { localStorage.setItem("bio-no:" + state.me.username, "1"); } catch {}
@@ -2337,7 +2321,7 @@ function wire() {
 wire();
 updateInstallItem();
 setupCapitals();
-startSignedOut().then(loadMe).then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
+loadMe().then(refresh).then(() => { handleHash(); remindLowOnce(); startPolling(); suggestInstallOnce(); }).catch((err) => {
   const empty = $("#empty");
   empty.hidden = false;
   empty.innerHTML = `<span class="error">${esc(err.message)}</span>`;
