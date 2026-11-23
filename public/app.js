@@ -100,13 +100,34 @@ function showLogin() {
         form.pin.value = "";
         dlg.close();
         state.askPinChange = res.must_change_pin;
+        state.offerBio = true;
         resolve();
       } catch (e2) { showError(err, e2); form.pin.value = ""; form.pin.focus(); }
       finally { btn.disabled = false; }
     };
+    const bioBtn = $("#btn-bio-login");
+    const showBio = async () => {
+      const ok = !!bioGet(form.username.value) && await bioSupported();
+      bioBtn.hidden = !ok;
+      $("#bio-or").hidden = !ok;
+      bioBtn.textContent = `🙂 Unlock with ${bioName()}`;
+      return ok;
+    };
+    form.username.oninput = showBio;
+    bioBtn.onclick = async () => {
+      err.hidden = true;
+      bioBtn.disabled = true;
+      try {
+        const res = await bioSignIn(form.username.value.trim());
+        dlg.close();
+        state.askPinChange = res.must_change_pin;
+        resolve();
+      } catch (e2) { showError(err, e2); showBio(); }
+      finally { bioBtn.disabled = false; }
+    };
     try { form.username.value = localStorage.getItem("last-username") || ""; } catch {}
     dlg.showModal();
-    (form.username.value ? form.pin : form.username).focus();
+    showBio().then((ok) => { if (!ok) (form.username.value ? form.pin : form.username).focus(); });
   });
 }
 
@@ -184,6 +205,103 @@ async function saveMyPin(e) {
     state.me.must_change_pin = false;
     toast("🔑 Your PIN has been changed", 3500);
   } catch (e2) { showError(err, e2); }
+}
+
+// ----- Face ID / fingerprint (passkeys) -----
+// The phone's own face / fingerprint check unlocks a key stored on the phone; the server checks it.
+// Which phone has it turned on for which username is remembered on the phone ("bio:<username>").
+const u8 = (b64url) => { const s = b64url.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(s + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)); };
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const bioName = () => isIOS() ? "Face ID" : "fingerprint";
+const BioName = () => bioName()[0].toUpperCase() + bioName().slice(1); // at the start of a sentence
+const bioKey = (username) => "bio:" + String(username || "").trim().toLowerCase();
+const bioGet = (username) => { try { return localStorage.getItem(bioKey(username)); } catch { return null; } };
+const bioSet = (username, id) => { try { id ? localStorage.setItem(bioKey(username), id) : localStorage.removeItem(bioKey(username)); } catch {} };
+let bioAvailable = null;
+async function bioSupported() {
+  if (bioAvailable === null) {
+    try { bioAvailable = !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); }
+    catch { bioAvailable = false; }
+  }
+  return bioAvailable;
+}
+
+function bioError(err) {
+  if (err && err.name === "NotAllowedError") return new Error(`${BioName()} was cancelled or didn't match. You can use your PIN.`);
+  if (err && err.name === "InvalidStateError") return new Error(`${BioName()} is already turned on for you on this phone.`);
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+async function turnOnBio() {
+  const o = await api("auth/bio/register-options", { method: "POST", body: {} });
+  let cred;
+  try {
+    cred = await navigator.credentials.create({ publicKey: {
+      ...o, challenge: u8(o.challenge), user: { ...o.user, id: u8(o.user.id) },
+      excludeCredentials: o.excludeCredentials.map((c) => ({ ...c, id: u8(c.id) })),
+    } });
+  } catch (err) { throw bioError(err); }
+  const r = cred.response;
+  const publicKey = r.getPublicKey && r.getPublicKey();
+  if (!publicKey || !r.getAuthenticatorData) throw new Error(`This browser can't use ${bioName()} for this app. Please update the phone, or keep using your PIN.`);
+  await api("auth/bio/register", { method: "POST", body: {
+    id: cred.id, clientDataJSON: b64u(r.clientDataJSON), authenticatorData: b64u(r.getAuthenticatorData()),
+    publicKey: b64u(publicKey), alg: r.getPublicKeyAlgorithm(), device: (navigator.userAgent.match(/\(([^)]+)\)/) || [])[1] || "",
+  } });
+  bioSet(state.me.username, cred.id);
+  updateBioMenu();
+}
+
+async function bioSignIn(username) {
+  let o;
+  try { o = await api("auth/bio/login-options", { method: "POST", noAuthRetry: true, body: { username } }); }
+  catch (err) { bioSet(username, null); throw err; } // turned off on the server (e.g. new PIN): forget it here
+  let cred;
+  try {
+    cred = await navigator.credentials.get({ publicKey: {
+      ...o, challenge: u8(o.challenge), allowCredentials: o.allowCredentials.map((c) => ({ ...c, id: u8(c.id) })),
+    } });
+  } catch (err) { throw bioError(err); }
+  const r = cred.response;
+  return api("auth/bio/login", { method: "POST", noAuthRetry: true, body: {
+    id: cred.id, clientDataJSON: b64u(r.clientDataJSON), authenticatorData: b64u(r.authenticatorData), signature: b64u(r.signature),
+  } });
+}
+
+async function updateBioMenu() {
+  const item = $("#menu-bio");
+  const on = !!(state.me && state.me.accounts && state.me.signed_in && await bioSupported());
+  item.hidden = !on;
+  if (on) item.textContent = bioGet(state.me.username) ? `🙂 Turn off ${bioName()} on this phone` : `🙂 Unlock with ${bioName()}`;
+}
+
+async function toggleBio() {
+  const id = bioGet(state.me.username);
+  try {
+    if (id) {
+      if (!confirm(`Turn off ${bioName()} on this phone? You'll sign in with your PIN.`)) return;
+      await api("auth/bio/remove", { method: "POST", body: { id } });
+      bioSet(state.me.username, null);
+      updateBioMenu();
+      toast(`${BioName()} turned off on this phone`);
+    } else {
+      await turnOnBio();
+      toast(`🙂 ${bioName()} is on. Next time, just tap "Unlock with ${bioName()}".`, 4500);
+    }
+  } catch (err) { toast(err.message, 5000); }
+}
+
+// After signing in with the PIN on a phone that can do it, offer it once (per person, per phone).
+async function offerBio() {
+  const me = state.me;
+  if (!me || !me.accounts || !me.signed_in || bioGet(me.username) || !(await bioSupported())) return;
+  try { if (localStorage.getItem("bio-no:" + me.username)) return; } catch {}
+  if (document.querySelector("dialog[open]")) return setTimeout(offerBio, 1500); // wait for other windows (e.g. new PIN)
+  $("#bio-offer-title").textContent = `Unlock with ${bioName()} next time?`;
+  $("#bio-offer-text").textContent = `Instead of typing your PIN, open the app and confirm with your ${isIOS() ? "face" : "fingerprint or face"}. ` +
+    "It only works on this phone and for you. Your PIN keeps working too.";
+  $("#bio-offer-error").hidden = true;
+  $("#dlg-bio-offer").showModal();
 }
 
 // ----- PIN every time -----
@@ -1921,6 +2039,8 @@ async function loadMe() {
   $("#menu-users").hidden = !(me.accounts && me.owner);
   $("#menu-mypin").hidden = !(me.accounts && me.signed_in);
   $("#menu-logout").hidden = !(me.accounts && me.signed_in);
+  updateBioMenu();
+  if (state.offerBio) { state.offerBio = false; setTimeout(offerBio, 1500); }
   let asked = false;
   try { asked = !!sessionStorage.getItem("pin-asked"); } catch {}
   if (me.accounts && me.must_change_pin && (state.askPinChange || !asked)) {
@@ -2080,6 +2200,7 @@ function wire() {
     else if (m === "users") openUsers();
     else if (m === "mypin") openMyPin();
     else if (m === "logout") logout();
+    else if (m === "bio") toggleBio();
   };
   $("#form-labels").addEventListener("change", updateLabelsForm);
   $("#form-labels").onsubmit = async (e) => {
@@ -2103,6 +2224,21 @@ function wire() {
     if (!f.username.value) f.username.value = suggestUsername(e.target.value);
   });
   blockCancel($("#dlg-login"));
+  $("#btn-bio-no").onclick = () => {
+    try { localStorage.setItem("bio-no:" + state.me.username, "1"); } catch {}
+    $("#dlg-bio-offer").close();
+    toast(`OK. You can turn on ${bioName()} later in ☰ More.`, 4000);
+  };
+  $("#btn-bio-yes").onclick = async () => {
+    const btn = $("#btn-bio-yes");
+    btn.disabled = true;
+    try {
+      await turnOnBio();
+      $("#dlg-bio-offer").close();
+      toast(`🙂 ${bioName()} is on. Next time, just tap "Unlock with ${bioName()}".`, 4500);
+    } catch (err) { showError($("#bio-offer-error"), err); }
+    finally { btn.disabled = false; }
+  };
   blockCancel($("#dlg-setup"));
   $("#tabbar").onclick = (e) => {
     const b = e.target.closest("[data-tab]");

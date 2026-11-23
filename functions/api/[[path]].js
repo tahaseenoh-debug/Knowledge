@@ -20,6 +20,11 @@
 //   POST   /auth/login                  {username, pin}
 //   POST   /auth/logout
 //   POST   /auth/pin                    {current_pin, new_pin}   (change own 6-digit PIN)
+//   POST   /auth/bio/register-options   (signed in) -> options to turn on Face ID / fingerprint on this phone
+//   POST   /auth/bio/register           {id, clientDataJSON, authenticatorData, publicKey, alg}
+//   POST   /auth/bio/login-options      {username}
+//   POST   /auth/bio/login              {id, clientDataJSON, authenticatorData, signature}
+//   POST   /auth/bio/remove             {id}  (signed in: turn it off for this phone)
 //   GET    /users                       (admin)
 //   POST   /users                       {name, username, role}  -> new account + generated PIN (admin)
 //   PUT    /users/:id                   {name?, role?, active?} (admin)
@@ -139,6 +144,20 @@ const SCHEMA = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+  `CREATE TABLE IF NOT EXISTS webauthn_credentials (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    public_key TEXT NOT NULL,
+    alg INTEGER NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    device TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used TEXT)`,
+  `CREATE TABLE IF NOT EXISTS webauthn_challenges (
+    challenge TEXT PRIMARY KEY,
+    user_id INTEGER,
+    purpose TEXT NOT NULL,
+    expires_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS photo_vectors (
     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
     photo_v TEXT NOT NULL,
@@ -322,10 +341,149 @@ const publicUser = (u) => ({ id: u.id, name: u.name, username: u.username, role:
 
 const withCookie = (res, c) => { res.headers.append("set-cookie", c); return res; };
 
+// ---------- Face ID / fingerprint (WebAuthn passkeys) ----------
+// The phone keeps a private key that only unlocks with the owner's face, finger or phone code;
+// the server stores the matching public key and checks a signature over a one-time challenge.
+const b64u = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = (str) => {
+  const s = String(str || "").replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(s + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+};
+const concat = (a, b) => { const o = new Uint8Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; };
+const sha256Bytes = async (b) => new Uint8Array(await crypto.subtle.digest("SHA-256", b));
+const bytesEqual = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+async function newChallenge(db, purpose, userId) {
+  const challenge = b64u(crypto.getRandomValues(new Uint8Array(32)));
+  await db.batch([
+    db.prepare("DELETE FROM webauthn_challenges WHERE expires_at <= datetime('now')"),
+    db.prepare("INSERT INTO webauthn_challenges (challenge, user_id, purpose, expires_at) VALUES (?, ?, ?, datetime('now', '+5 minutes'))")
+      .bind(challenge, userId ?? null, purpose),
+  ]);
+  return challenge;
+}
+
+// Checks the browser's signed "client data": right purpose, our one-time challenge, our website.
+async function checkClientData(db, request, cdBytes, type, purpose) {
+  let cd;
+  try { cd = JSON.parse(new TextDecoder().decode(cdBytes)); } catch { throw new HttpError(400, "Face ID / fingerprint check failed"); }
+  if (cd.type !== type) throw new HttpError(400, "Face ID / fingerprint check failed");
+  if (cd.origin !== new URL(request.url).origin) throw new HttpError(400, "Face ID / fingerprint: wrong website");
+  const ch = await db.prepare("DELETE FROM webauthn_challenges WHERE challenge = ? AND purpose = ? AND expires_at > datetime('now') RETURNING user_id")
+    .bind(String(cd.challenge || ""), purpose).first();
+  if (!ch) throw new HttpError(400, "That took too long. Please try again.");
+  return ch;
+}
+
+// Authenticator data: made for this website, and the person was verified (face / finger / phone code).
+async function checkAuthData(request, ad) {
+  if (ad.length < 37) throw new HttpError(400, "Face ID / fingerprint check failed");
+  const rpHash = await sha256Bytes(new TextEncoder().encode(new URL(request.url).hostname));
+  if (!bytesEqual(ad.slice(0, 32), rpHash)) throw new HttpError(400, "Face ID / fingerprint: wrong website");
+  const flags = ad[32];
+  if (!(flags & 0x01) || !(flags & 0x04)) throw new HttpError(400, "Face ID / fingerprint wasn't confirmed");
+  return new DataView(ad.buffer, ad.byteOffset + 33, 4).getUint32(0);
+}
+
+// ECDSA signatures arrive DER-encoded; WebCrypto wants the plain 64-byte r|s form.
+function derToRaw(der) {
+  if (der[0] !== 0x30) return der;
+  let i = 2;
+  const part = () => {
+    if (der[i++] !== 0x02) throw new Error("bad signature");
+    const len = der[i++];
+    let v = der.slice(i, i + len); i += len;
+    while (v.length > 32 && v[0] === 0) v = v.slice(1);
+    const out = new Uint8Array(32); out.set(v, 32 - v.length); return out;
+  };
+  return concat(part(), part());
+}
+
+async function verifySignature(alg, spkiB64, data, sig) {
+  const spki = unb64u(spkiB64);
+  if (alg === -7) {
+    const key = await crypto.subtle.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, derToRaw(sig), data);
+  }
+  if (alg === -257) {
+    const key = await crypto.subtle.importKey("spki", spki, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]);
+    return crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, sig, data);
+  }
+  return false;
+}
+
+async function bioRoute(request, env, step, user) {
+  const db = env.DB;
+  const host = new URL(request.url).hostname;
+  if (request.method !== "POST") throw new HttpError(404, "Not found");
+  const body = await readBody(request);
+
+  if (step === "register-options") {
+    if (!user) throw new HttpError(401, "Please sign in", { auth: "login" });
+    const { results } = await db.prepare("SELECT id FROM webauthn_credentials WHERE user_id = ?").bind(user.id).all();
+    return json({
+      challenge: await newChallenge(db, "register", user.id),
+      rp: { name: "Jewellery Inventory", id: host },
+      user: { id: b64u(new TextEncoder().encode("u" + user.id)), name: user.username, displayName: user.name },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "preferred" },
+      excludeCredentials: results.map((r) => ({ type: "public-key", id: r.id })),
+      attestation: "none", timeout: 60000,
+    });
+  }
+  if (step === "register") {
+    if (!user) throw new HttpError(401, "Please sign in", { auth: "login" });
+    const ch = await checkClientData(db, request, unb64u(body.clientDataJSON), "webauthn.create", "register");
+    if (ch.user_id !== user.id) throw new HttpError(400, "Face ID / fingerprint check failed");
+    const signCount = await checkAuthData(request, unb64u(body.authenticatorData));
+    const alg = Number(body.alg);
+    if (![-7, -257].includes(alg) || !body.publicKey || !body.id) throw new HttpError(400, "This phone's Face ID / fingerprint type isn't supported");
+    await db.prepare(
+      "INSERT OR REPLACE INTO webauthn_credentials (id, user_id, public_key, alg, sign_count, device) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(String(body.id), user.id, String(body.publicKey), alg, signCount, String(body.device || "").slice(0, 60)).run();
+    return json({ ok: true });
+  }
+  if (step === "login-options") {
+    let username;
+    try { username = cleanUsername(body.username); } catch { username = ""; }
+    const u = username && await db.prepare("SELECT id FROM users WHERE username = ? AND active = 1").bind(username).first();
+    const { results } = u ? await db.prepare("SELECT id FROM webauthn_credentials WHERE user_id = ?").bind(u.id).all() : { results: [] };
+    if (!results.length) throw new HttpError(404, "Face ID / fingerprint isn't turned on for this account on this phone. Use your PIN.");
+    return json({ challenge: await newChallenge(db, "login", u.id), rpId: host, userVerification: "required", timeout: 60000,
+      allowCredentials: results.map((r) => ({ type: "public-key", id: r.id })) });
+  }
+  if (step === "login") {
+    const cred = await db.prepare(
+      `SELECT c.*, u.name, u.role, u.must_change_pin, u.active FROM webauthn_credentials c JOIN users u ON u.id = c.user_id WHERE c.id = ?`)
+      .bind(String(body.id || "")).first();
+    if (!cred || !cred.active) throw new HttpError(401, "Face ID / fingerprint isn't set up for this account any more. Use your PIN.", { auth: "login" });
+    const cdBytes = unb64u(body.clientDataJSON);
+    const ch = await checkClientData(db, request, cdBytes, "webauthn.get", "login");
+    if (ch.user_id !== cred.user_id) throw new HttpError(401, "Face ID / fingerprint check failed", { auth: "login" });
+    const ad = unb64u(body.authenticatorData);
+    const signCount = await checkAuthData(request, ad);
+    const ok = await verifySignature(cred.alg, cred.public_key, concat(ad, await sha256Bytes(cdBytes)), unb64u(body.signature));
+    if (!ok) throw new HttpError(401, "Face ID / fingerprint check failed", { auth: "login" });
+    if (signCount && cred.sign_count && signCount <= cred.sign_count) {
+      throw new HttpError(401, "This Face ID / fingerprint key looks copied. Use your PIN, and ask an admin to check.", { auth: "login" });
+    }
+    await db.prepare("UPDATE webauthn_credentials SET sign_count = ?, last_used = datetime('now') WHERE id = ?").bind(signCount, cred.id).run();
+    return withCookie(json({ ok: true, name: cred.name, role: cred.role, must_change_pin: !!cred.must_change_pin }),
+      await startSession(db, cred.user_id, request));
+  }
+  if (step === "remove") {
+    if (!user) throw new HttpError(401, "Please sign in", { auth: "login" });
+    await db.prepare("DELETE FROM webauthn_credentials WHERE id = ? AND user_id = ?").bind(String(body.id || ""), user.id).run();
+    return json({ ok: true });
+  }
+  throw new HttpError(404, "Not found");
+}
+
 // Sign-in routes: these work without being signed in.
-async function authRoute(request, env, sub, user) {
+async function authRoute(request, env, sub, user, step) {
   const db = env.DB;
   const method = request.method;
+  if (sub === "bio") return bioRoute(request, env, step, user);
   if (sub === "status" && method === "GET") {
     if (env.ACCESS_TEAM_DOMAIN && env.ACCESS_AUD) return json({ mode: "access", setup_needed: false, signed_in: true });
     const n = await userCount(db);
@@ -435,6 +593,7 @@ async function usersRoute(request, env, id, sub, user) {
       db.prepare("UPDATE users SET pin_hash = ?, pin_salt = ?, must_change_pin = 1, failed_attempts = 0, locked_until = NULL WHERE id = ?")
         .bind(f.pin_hash, f.pin_salt, id),
       db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
+      db.prepare("DELETE FROM webauthn_credentials WHERE user_id = ?").bind(id), // e.g. lost phone
     ]);
     return json({ pin, user: publicUser(await db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first()) });
   }
@@ -1242,7 +1401,7 @@ export async function onRequest({ request, env, params, waitUntil }) {
     } else {
       // Built-in staff accounts with 6-digit PINs.
       user = await sessionUser(env.DB, request);
-      if (parts[0] === "auth") return await authRoute(request, env, parts[1], user);
+      if (parts[0] === "auth") return await authRoute(request, env, parts[1], user, parts[2]);
       if (!user) {
         const setup = (await userCount(env.DB)) === 0;
         throw new HttpError(401, setup ? "First-time setup needed" : "Please sign in", { auth: setup ? "setup" : "login" });

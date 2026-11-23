@@ -93,6 +93,7 @@
       <button type="button" class="menu-item" data-menu="labels">🖨 Print QR labels</button>
       <button type="button" class="menu-item" data-menu="export">⬇️ Export to Excel (CSV)</button>
       <button type="button" class="menu-item" data-menu="users" id="menu-users" hidden>👥 Staff accounts</button>
+      <button type="button" class="menu-item" data-menu="bio" id="menu-bio" hidden></button>
       <button type="button" class="menu-item" data-menu="mypin" id="menu-mypin" hidden>🔑 Change my PIN</button>
       <button type="button" class="menu-item" data-menu="logout" id="menu-logout" hidden>🚪 Sign out</button>
       <div class="actions"><span class="spacer"></span><button type="button" class="ghost" data-close>Close</button></div>
@@ -453,6 +454,8 @@
     <form id="form-login" method="dialog">
       <div class="auth-logo" aria-hidden="true">💎</div>
       <h2>Sign in</h2>
+      <button type="button" class="primary big-btn bio-btn" id="btn-bio-login" hidden></button>
+      <p class="muted center or-line" id="bio-or" hidden>or use your PIN</p>
       <label>Username<input name="username" required autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. ayesha"></label>
       <label>6-digit PIN<input name="pin" class="pin-input" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="current-password" placeholder="••••••"></label>
       <p class="error" id="login-error" hidden></p>
@@ -488,6 +491,21 @@
         <button type="button" class="ghost" id="btn-pin-share" hidden>📤 Share</button>
         <span class="spacer"></span>
         <button type="button" class="primary" data-close>Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Offer Face ID / fingerprint -->
+  <dialog id="dlg-bio-offer" class="auth-dlg">
+    <div class="dlg-body">
+      <div class="auth-logo" aria-hidden="true">🙂</div>
+      <h2 id="bio-offer-title">Unlock with Face ID next time?</h2>
+      <p class="muted center" id="bio-offer-text"></p>
+      <p class="error" id="bio-offer-error" hidden></p>
+      <div class="row wrap">
+        <button type="button" class="ghost" id="btn-bio-no">Not now</button>
+        <span class="spacer"></span>
+        <button type="button" class="primary" id="btn-bio-yes">Turn on</button>
       </div>
     </div>
   </dialog>

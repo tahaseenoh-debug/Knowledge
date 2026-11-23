@@ -557,6 +557,8 @@ dialog form, .dlg-body { min-width: 0; }
 .auth-dlg h2 { text-align: center; }
 .center { text-align: center; }
 .pin-input { font: 700 22px ui-monospace, Menlo, monospace !important; letter-spacing: 8px; text-align: center; }
+.bio-btn { font-size: 17px; min-height: 56px; }
+.or-line { margin: -4px 0 0; font-size: 13px; }
 .pin-big { font: 800 40px ui-monospace, Menlo, monospace; letter-spacing: 10px; text-align: center; padding: 14px; border-radius: 12px; background: var(--accent-soft); color: var(--text); user-select: all; }
 .pin-warn { margin: 0; font-size: 13px; color: var(--warn); text-align: center; }
 .user-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

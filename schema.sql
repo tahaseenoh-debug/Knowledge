@@ -151,3 +151,22 @@ CREATE TABLE IF NOT EXISTS sessions (              -- signed-in phones (60 days)
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- Face ID / fingerprint (passkeys): public keys of phones that can unlock an account
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id         TEXT PRIMARY KEY,            -- credential id (base64url)
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  public_key TEXT NOT NULL,               -- SPKI, base64url
+  alg        INTEGER NOT NULL,            -- -7 (ES256) or -257 (RS256)
+  sign_count INTEGER NOT NULL DEFAULT 0,
+  device     TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS webauthn_challenges (  -- one-time challenges, valid 5 minutes
+  challenge  TEXT PRIMARY KEY,
+  user_id    INTEGER,
+  purpose    TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
